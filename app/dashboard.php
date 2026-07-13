@@ -931,7 +931,7 @@ function showMsg(el, idx){
   document.getElementById('mailIframe').srcdoc = body || '<p style="color:#999;padding:16px">无正文</p>';
 }
 
-function copyTextfunction copyText(t){
+function copyText(t){
   navigator.clipboard.writeText(t).then(()=>toast('已复制: '+t)).catch(()=>{
     const ta=document.createElement('textarea'); ta.value=t; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); toast('已复制: '+t);
   });
