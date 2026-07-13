@@ -1,0 +1,13 @@
+runtime/
+app/data/*.db
+app/data/*.db-*
+app/data/jobs/*
+!app/data/.gitkeep
+!app/data/jobs/.gitkeep
+*.exe
+*.zip
+*.tar.gz
+.DS_Store
+Thumbs.db
+launcher/outlook-mail-helper
+launcher/Outlook邮箱助手.exe

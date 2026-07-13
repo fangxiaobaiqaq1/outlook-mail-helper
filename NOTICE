@@ -1,0 +1,18 @@
+Third-Party Notices
+==================
+
+1) OutlookPanel
+   Project: https://github.com/CN-Root/OutlookPanel
+   License: MIT
+   Note: This repository is a heavy fork/rewrite for local multi-account
+   Outlook OAuth mail checking and inbox reading.
+
+2) PHP (Windows portable runtime, if redistributed in binary packages)
+   Project: https://www.php.net/
+   License: PHP License
+   Note: Runtime binaries are redistributed only in release zip packages,
+   not necessarily in the source tree.
+
+3) CA certificates (cacert.pem)
+   Source: https://curl.se/ca/cacert.pem
+   Used for TLS verification of Microsoft OAuth / IMAP endpoints.

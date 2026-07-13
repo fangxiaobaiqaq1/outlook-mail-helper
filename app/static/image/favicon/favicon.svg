@@ -1,0 +1,28 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+
+  <!-- 背景 -->
+  <rect width="512" height="512" rx="120" fill="url(#bg)"/>
+
+  <!-- 邮件主体 -->
+  <rect x="96" y="120" width="320" height="220" rx="36" fill="white" fill-opacity="0.96"/>
+
+  <!-- 邮件折叠 -->
+  <path d="M96 160L256 280L416 160" stroke="#1677FF" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- 面板图层 -->
+  <rect x="160" y="320" width="192" height="36" rx="18" fill="#DCEBFF"/>
+  <rect x="190" y="380" width="132" height="20" rx="10" fill="#B6D4FF"/>
+
+  <!-- OP 字母 -->
+  <circle cx="170" cy="170" r="34" fill="#1677FF"/>
+  <path d="M160 154H176C186 154 194 162 194 172C194 182 186 190 176 190H160V154Z" fill="white"/>
+
+  <!-- 渐变定义 -->
+  <defs>
+    <linearGradient id="bg" x1="64" y1="40" x2="450" y2="470" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0A84FF"/>
+      <stop offset="1" stop-color="#2563EB"/>
+    </linearGradient>
+  </defs>
+
+</svg>
