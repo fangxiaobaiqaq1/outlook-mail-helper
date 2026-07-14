@@ -62,6 +62,23 @@ if ($action === 'add') {
 // ---------- 批量文本导入 ----------
 if ($action === 'import_text') {
     $text = (string)($_POST['text'] ?? '');
+    // 也允许 JSON body
+    if ($text === '') {
+        $rawBody = file_get_contents('php://input');
+        if ($rawBody) {
+            $j = json_decode($rawBody, true);
+            if (is_array($j) && isset($j['text'])) $text = (string)$j['text'];
+            elseif ($rawBody !== '' && $rawBody[0] !== '{') $text = $rawBody;
+        }
+    }
+    if ($text === '') json_out(['ok' => false, 'error' => '文本为空'], 400);
+    if (strlen($text) > 80 * 1024 * 1024) {
+        json_out(['ok' => false, 'error' => '内容过大（>80MB），请拆分导入'], 400);
+    }
+
+    @set_time_limit(0);
+    @ini_set('memory_limit', '512M');
+
     $lines = preg_split('/\r\n|\r|\n/', $text);
     $added = 0;
     $updated = 0;
@@ -72,26 +89,33 @@ if ($action === 'import_text') {
     $ins = $db->prepare("INSERT INTO accounts (email, password, client_id, refresh_token, remark, status) VALUES (?,?,?,?,?, 'unknown')");
     $upd = $db->prepare("UPDATE accounts SET password=?, client_id=?, refresh_token=?, remark=?, status='unknown', last_error=NULL WHERE id=?");
 
-    foreach ($lines as $i => $line) {
-        $parsed = parse_account_line($line);
-        if (!$parsed) {
-            if (trim($line) !== '') {
-                $failed++;
-                if (count($errors) < 20) $errors[] = '第' . ($i + 1) . '行格式无效';
+    $db->beginTransaction();
+    try {
+        foreach ($lines as $i => $line) {
+            $parsed = parse_account_line($line);
+            if (!$parsed) {
+                if (trim($line) !== '') {
+                    $failed++;
+                    if (count($errors) < 20) $errors[] = '第' . ($i + 1) . '行格式无效';
+                }
+                continue;
             }
-            continue;
+            $sel->execute([$parsed['email']]);
+            $old = $sel->fetch();
+            if ($old) {
+                $upd->execute([$parsed['password'], $parsed['client_id'], $parsed['refresh_token'], $parsed['remark'], $old['id']]);
+                $updated++;
+            } else {
+                $ins->execute([$parsed['email'], $parsed['password'], $parsed['client_id'], $parsed['refresh_token'], $parsed['remark']]);
+                $added++;
+            }
         }
-        $sel->execute([$parsed['email']]);
-        $old = $sel->fetch();
-        if ($old) {
-            $upd->execute([$parsed['password'], $parsed['client_id'], $parsed['refresh_token'], $parsed['remark'], $old['id']]);
-            $updated++;
-        } else {
-            $ins->execute([$parsed['email'], $parsed['password'], $parsed['client_id'], $parsed['refresh_token'], $parsed['remark']]);
-            $added++;
-        }
+        $db->commit();
+    } catch (Throwable $e) {
+        if ($db->inTransaction()) $db->rollBack();
+        json_out(['ok' => false, 'error' => '导入异常: ' . $e->getMessage()], 500);
     }
-    json_out(['ok' => true, 'added' => $added, 'updated' => $updated, 'failed' => $failed, 'errors' => $errors]);
+    json_out(['ok' => true, 'added' => $added, 'updated' => $updated, 'failed' => $failed, 'errors' => $errors, 'total_lines' => count($lines)]);
 }
 
 // ---------- 更新 ----------
@@ -419,41 +443,92 @@ if ($action === 'export') {
 }
 
 if ($action === 'import') {
-    if (!isset($_FILES['file'])) json_out(['ok' => false, 'error' => '未上传文件'], 400);
-    $raw = file_get_contents($_FILES['file']['tmp_name']);
+    // 大文件上传失败时 tmp_name 为空 → 以前直接 500，前端 JSON.parse 炸掉
+    $raw = '';
+    if (!empty($_POST['text'])) {
+        // 前端也可把文件内容读出来走 text，绕过 upload 限制
+        $raw = (string)$_POST['text'];
+    } elseif (isset($_FILES['file'])) {
+        $f = $_FILES['file'];
+        $err = (int)($f['error'] ?? UPLOAD_ERR_NO_FILE);
+        if ($err !== UPLOAD_ERR_OK) {
+            $map = [
+                UPLOAD_ERR_INI_SIZE   => '文件超过 php.ini upload_max_filesize',
+                UPLOAD_ERR_FORM_SIZE  => '文件超过表单 MAX_FILE_SIZE',
+                UPLOAD_ERR_PARTIAL    => '文件只上传了一部分',
+                UPLOAD_ERR_NO_FILE    => '未选择文件',
+                UPLOAD_ERR_NO_TMP_DIR => '服务器临时目录不存在',
+                UPLOAD_ERR_CANT_WRITE => '无法写入临时文件',
+                UPLOAD_ERR_EXTENSION  => '扩展阻止了上传',
+            ];
+            $msg = $map[$err] ?? ('上传失败 error=' . $err);
+            $msg .= '。建议：用「粘贴文本」导入，或把文件拆小。当前 post_max=' . ini_get('post_max_size') . ' upload_max=' . ini_get('upload_max_filesize');
+            json_out(['ok' => false, 'error' => $msg], 400);
+        }
+        $tmp = (string)($f['tmp_name'] ?? '');
+        if ($tmp === '' || !is_file($tmp)) {
+            json_out([
+                'ok' => false,
+                'error' => '上传临时文件无效（可能超过 post_max_size=' . ini_get('post_max_size') . '）。请改用粘贴文本导入。',
+            ], 400);
+        }
+        $raw = (string)@file_get_contents($tmp);
+        if ($raw === '' && filesize($tmp) > 0) {
+            json_out(['ok' => false, 'error' => '无法读取上传文件'], 400);
+        }
+    } else {
+        json_out(['ok' => false, 'error' => '未上传文件且未提供 text 字段'], 400);
+    }
+
+    if (strlen($raw) > 80 * 1024 * 1024) {
+        json_out(['ok' => false, 'error' => '内容过大（>80MB），请拆分导入'], 400);
+    }
+
+    @set_time_limit(0);
+    @ini_set('memory_limit', '512M');
+
     $data = json_decode($raw, true);
     $added = 0; $updated = 0; $failed = 0;
     $sel = $db->prepare("SELECT id FROM accounts WHERE email=?");
     $ins = $db->prepare("INSERT INTO accounts (email,password,client_id,refresh_token,remark,status) VALUES (?,?,?,?,?, 'unknown')");
     $upd = $db->prepare("UPDATE accounts SET password=?, client_id=?, refresh_token=?, remark=?, status='unknown', last_error=NULL WHERE id=?");
-    if (is_array($data)) {
-        foreach ($data as $i) {
-            if (empty($i['email'])) { $failed++; continue; }
-            $sel->execute([$i['email']]);
-            $old = $sel->fetch();
-            if ($old) {
-                $upd->execute([$i['password']??'', $i['client_id']??'', $i['refresh_token']??'', $i['remark']??'', $old['id']]);
-                $updated++;
-            } else {
-                $ins->execute([$i['email'], $i['password']??'', $i['client_id']??'', $i['refresh_token']??'', $i['remark']??'']);
-                $added++;
+
+    // 批量事务加速 1 万行
+    $db->beginTransaction();
+    try {
+        if (is_array($data)) {
+            foreach ($data as $i) {
+                if (empty($i['email'])) { $failed++; continue; }
+                $sel->execute([$i['email']]);
+                $old = $sel->fetch();
+                if ($old) {
+                    $upd->execute([$i['password']??'', $i['client_id']??'', $i['refresh_token']??'', $i['remark']??'', $old['id']]);
+                    $updated++;
+                } else {
+                    $ins->execute([$i['email'], $i['password']??'', $i['client_id']??'', $i['refresh_token']??'', $i['remark']??'']);
+                    $added++;
+                }
+            }
+        } else {
+            $lines = preg_split('/\r\n|\r|\n/', (string)$raw);
+            foreach ($lines as $line) {
+                $p = parse_account_line($line);
+                if (!$p) { if (trim($line) !== '') $failed++; continue; }
+                $sel->execute([$p['email']]);
+                $old = $sel->fetch();
+                if ($old) {
+                    $upd->execute([$p['password'], $p['client_id'], $p['refresh_token'], $p['remark'], $old['id']]);
+                    $updated++;
+                } else {
+                    $ins->execute([$p['email'], $p['password'], $p['client_id'], $p['refresh_token'], $p['remark']]);
+                    $added++;
+                }
             }
         }
-    } else {
-        $lines = preg_split('/\r\n|\r|\n/', (string)$raw);
-        foreach ($lines as $line) {
-            $p = parse_account_line($line);
-            if (!$p) { if (trim($line) !== '') $failed++; continue; }
-            $sel->execute([$p['email']]);
-            $old = $sel->fetch();
-            if ($old) {
-                $upd->execute([$p['password'], $p['client_id'], $p['refresh_token'], $p['remark'], $old['id']]);
-                $updated++;
-            } else {
-                $ins->execute([$p['email'], $p['password'], $p['client_id'], $p['refresh_token'], $p['remark']]);
-                $added++;
-            }
-        }
+        $db->commit();
+    } catch (Throwable $e) {
+        if ($db->inTransaction()) $db->rollBack();
+        json_out(['ok' => false, 'error' => '导入异常: ' . $e->getMessage()], 500);
     }
     json_out(['ok' => true, 'added' => $added, 'updated' => $updated, 'failed' => $failed]);
 }

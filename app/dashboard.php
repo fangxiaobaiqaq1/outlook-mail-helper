@@ -350,24 +350,42 @@ function openAdd(){
 function openImport(){
   showForm('批量导入', `
     <label>粘贴多行凭证（每行一个）</label>
-    <textarea id="import_text" rows="12" placeholder="email----pass----client_id----refresh_token\nemail----pass----client_id----refresh_token"></textarea>
-    <div style="font-size:12px;color:#64748b;margin-bottom:8px">也支持上传 JSON/TXT：
-      <input type="file" id="importFile" accept=".json,.txt" style="margin-top:8px">
+    <textarea id="import_text" rows="12" placeholder="email----pass----client_id----refresh_token"></textarea>
+    <div style="font-size:12px;color:#64748b;margin-bottom:8px">
+      或选择 JSON/TXT 文件（1 万行建议用文件，浏览器本地读取，避免上传失败）：
+      <input type="file" id="importFile" accept=".json,.txt,.csv" style="margin-top:8px">
     </div>
+    <div class="field-hint">大文件请用 txt 一行一条；不要用超大 JSON 数组。</div>
   `, async ()=>{
     const file = document.getElementById('importFile').files[0];
+    let text = document.getElementById('import_text').value || '';
+    // 文件优先：前端 FileReader 读文本，走 import_text，绕过 PHP 上传限制
     if(file){
-      const fd = new FormData(); fd.append('file', file);
-      const r = await (await fetch('api.php?action=import',{method:'POST',body:fd,headers:{'X-Requested-With':'XMLHttpRequest'}})).json();
-      if(!r.ok) throw new Error(r.error||'导入失败');
-      toast('导入 '+ (r.added||0) +' 条');
-      return;
+      if(file.size > 80*1024*1024) throw new Error('文件超过 80MB，请拆分');
+      text = await new Promise((resolve, reject)=>{
+        const reader = new FileReader();
+        reader.onload = ()=>resolve(String(reader.result||''));
+        reader.onerror = ()=>reject(new Error('读取文件失败'));
+        reader.readAsText(file);
+      });
     }
+    if(!text.trim()) throw new Error('没有可导入的内容');
+    const lines = text.split(/\r\n|\r|\n/).filter(l=>l.trim()).length;
+    if(lines > 500 && !confirm('将导入约 '+lines+' 行，可能需要几十秒，继续？')) return;
+
     const fd = new FormData();
-    fd.append('text', document.getElementById('import_text').value);
-    const r = await (await fetch('api.php?action=import_text',{method:'POST',body:fd,headers:{'X-Requested-With':'XMLHttpRequest'}})).json();
+    fd.append('text', text);
+    const resp = await fetch('api.php?action=import_text',{
+      method:'POST', body:fd, headers:{'X-Requested-With':'XMLHttpRequest'}
+    });
+    const raw = await resp.text();
+    let r;
+    try { r = JSON.parse(raw); }
+    catch(e){
+      throw new Error('服务器返回异常 HTTP '+resp.status+'：'+(raw.slice(0,120)||'空响应')+'。大文件请确认已用本版本导入。');
+    }
     if(!r.ok) throw new Error(r.error||'导入失败');
-    toast(`新增${r.added} 更新${r.updated} 失败${r.failed}`);
+    toast(`导入完成：新增${r.added||0} 更新${r.updated||0} 失败${r.failed||0}`);
   });
 }
 
