@@ -83,6 +83,13 @@ input:focus,textarea:focus{border-color:var(--main);box-shadow:0 0 0 3px rgba(37
 .progress>i{display:block;height:100%;width:0;background:linear-gradient(90deg,#2563eb,#22c55e);transition:width .2s}
 .log{background:#0b1220;color:#cbd5e1;border-radius:12px;padding:12px;font-size:12px;max-height:220px;overflow:auto;font-family:ui-monospace,Consolas,monospace;white-space:pre-wrap}
 .toast{position:fixed;right:16px;bottom:16px;background:#0f172a;color:#fff;padding:12px 14px;border-radius:12px;z-index:200;display:none;max-width:360px;font-size:13px}
+.pager{display:flex;gap:8px;align-items:center;justify-content:center;margin:16px 0 80px;flex-wrap:wrap}
+.pager .btn.active{background:var(--main);color:#fff;border-color:var(--main)}
+.card{padding:12px 14px}
+.card h3{font-size:13px;margin:0 0 4px}
+.card p{font-size:12px;min-height:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.grid{grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px}
+
 @media (max-width:800px){
   .stats{grid-template-columns:repeat(2,1fr)}
   .mail-layout{grid-template-columns:1fr}
@@ -151,6 +158,7 @@ input:focus,textarea:focus{border-color:var(--main);box-shadow:0 0 0 3px rgba(37
   </div>
 
   <div id="grid" class="grid"></div>
+  <div class="pager" id="pagerBar"></div>
 </div>
 
 <!-- form modal -->
@@ -212,8 +220,15 @@ input:focus,textarea:focus{border-color:var(--main);box-shadow:0 0 0 3px rgba(37
 <div class="toast" id="toast"></div>
 
 <script>
-let allAccounts = [];
+let pageAccounts = [];       // 当前页轻量数据
 let filter = 'all';
+let listPage = 1;
+let listPageSize = 100;
+let listTotalPages = 1;
+let filteredTotal = 0;
+let statsCache = {total:0,live:0,dead:0,unknown:0};
+let searchTimer = null;
+let listLoading = false;
 let currentMailId = null;
 let mailCache = [];
 let selectedIds = new Set();
@@ -239,70 +254,161 @@ function badge(status){
   return '<span class="badge badge-unknown">未检测</span>';
 }
 
-async function loadList(){
-  const res = await fetch('api.php?action=list', {headers:{'X-Requested-With':'XMLHttpRequest'}});
-  const data = await res.json();
-  allAccounts = data.data || [];
-  renderStats();
-  doSearch();
+async function loadList(opts={}){
+  if(listLoading) return;
+  listLoading = true;
+  try{
+    if(opts.resetPage) listPage = 1;
+    const kw = document.getElementById('searchInput').value.trim();
+    const qs = new URLSearchParams({
+      action: 'list',
+      page: String(listPage),
+      page_size: String(listPageSize),
+      status: filter || 'all',
+      q: kw
+    });
+    const res = await fetch('api.php?' + qs.toString(), {headers:{'X-Requested-With':'XMLHttpRequest'}});
+    const raw = await res.text();
+    let data;
+    try { data = JSON.parse(raw); }
+    catch(e){ toast('列表加载失败 HTTP '+res.status); return; }
+    if(!data.ok){ toast(data.error||'列表失败'); return; }
+    pageAccounts = data.data || [];
+    filteredTotal = data.filtered_total || 0;
+    listTotalPages = data.total_pages || 1;
+    listPage = data.page || listPage;
+    if(data.stats) statsCache = data.stats;
+    renderStats();
+    renderGrid(pageAccounts);
+    renderPager();
+  } finally {
+    listLoading = false;
+  }
 }
 
 function renderStats(){
-  const total = allAccounts.length;
-  const live = allAccounts.filter(a=>a.status==='live').length;
-  const dead = allAccounts.filter(a=>a.status==='dead').length;
-  const unk = total - live - dead;
-  document.getElementById('stTotal').textContent = total;
-  document.getElementById('stLive').textContent = live;
-  document.getElementById('stDead').textContent = dead;
-  document.getElementById('stUnk').textContent = unk;
+  document.getElementById('stTotal').textContent = statsCache.total||0;
+  document.getElementById('stLive').textContent = statsCache.live||0;
+  document.getElementById('stDead').textContent = statsCache.dead||0;
+  document.getElementById('stUnk').textContent = statsCache.unknown||0;
 }
 
-function filteredList(){
-  const kw = document.getElementById('searchInput').value.toLowerCase().trim();
-  return allAccounts.filter(a=>{
-    if(filter==='live' && a.status!=='live') return false;
-    if(filter==='dead' && a.status!=='dead') return false;
-    if(filter==='unknown' && (a.status==='live'||a.status==='dead')) return false;
-    if(!kw) return true;
-    return (a.email||'').toLowerCase().includes(kw) || (a.remark||'').toLowerCase().includes(kw);
-  });
+function doSearch(){
+  // 防抖：输入停 250ms 再请求
+  if(searchTimer) clearTimeout(searchTimer);
+  searchTimer = setTimeout(()=>{ listPage = 1; loadList(); }, 250);
 }
-
-function doSearch(){ renderGrid(filteredList()); }
-function filterStatus(s){ filter=s; doSearch(); }
+function filterStatus(s){
+  filter = s;
+  listPage = 1;
+  loadList();
+}
 
 function renderGrid(data){
   const grid = document.getElementById('grid');
   if(!data.length){
-    grid.innerHTML = `<div class="empty"><div style="font-size:40px;margin-bottom:10px">📥</div>还没有账号，点击「添加」或「批量导入」</div>`;
+    grid.innerHTML = `<div class="empty"><div style="font-size:40px;margin-bottom:10px">📥</div>${filteredTotal===0 && !document.getElementById('searchInput').value ? '还没有账号，点击「添加」或「批量导入」' : '当前筛选无结果'}</div>`;
+    updateBulkBar();
     return;
   }
-  const countEl = document.getElementById('listCount');
-  if(countEl) countEl.textContent = `显示 ${data.length} / 总 ${allAccounts.length} · 已选 ${selectedIds.size}`;
-  grid.innerHTML = data.map(i=>{
-    const sid = +i.id;
+  // 文档片段批量插入，避免万级字符串一次性炸
+  const frag = document.createDocumentFragment();
+  const wrap = document.createElement('div');
+  // 只渲染当前页（<=pageSize）
+  let html = '';
+  for(let i=0;i<data.length;i++){
+    const a = data[i];
+    const sid = +a.id;
     const checked = selectedIds.has(sid) ? 'checked' : '';
     const selCls = selectedIds.has(sid) ? ' selected' : '';
-    return `
-    <div class="card${selCls}" onclick="viewMail(${sid}, ${JSON.stringify(String(i.email||''))})">
+    const err = a.last_error ? (' · ' + esc(String(a.last_error).slice(0,30))) : '';
+    html += `<div class="card${selCls}" data-id="${sid}">
       <div class="card-top">
         <div style="display:flex;align-items:center;gap:8px">
-          <input class="selbox" type="checkbox" ${checked} onclick="event.stopPropagation();toggleSelect(${sid}, this.checked)" title="选择">
-          ${badge(i.status||'unknown')}
+          <input class="selbox" type="checkbox" ${checked} data-sel="${sid}" title="选择">
+          ${badge(a.status||'unknown')}
         </div>
         <div class="card-actions">
-          <button class="icon-btn" title="验活" onclick="event.stopPropagation();checkOne(${sid})">✓</button>
-          <button class="icon-btn" title="编辑" onclick="event.stopPropagation();openEdit(${sid})">✎</button>
-          <button class="icon-btn" title="删除" onclick="event.stopPropagation();delAcc(${sid}, ${JSON.stringify(String(i.email||''))})">🗑</button>
+          <button class="icon-btn" data-act="check" data-id="${sid}" title="验活">✓</button>
+          <button class="icon-btn" data-act="edit" data-id="${sid}" title="编辑">✎</button>
+          <button class="icon-btn" data-act="del" data-id="${sid}" data-email="${esc(a.email||'')}" title="删除">🗑</button>
         </div>
       </div>
-      <h3>${esc(i.email)}</h3>
-      <p>${esc(i.remark||'无备注')}</p>
-      <div class="meta">#${sid} · ${esc(i.last_check_at||'未检测')}${i.last_error? ' · '+esc(String(i.last_error).slice(0,40)):''}</div>
+      <h3>${esc(a.email)}</h3>
+      <p>${esc(a.remark||'无备注')}</p>
+      <div class="meta">#${sid} · ${esc(a.last_check_at||'未检测')}${err}</div>
     </div>`;
-  }).join('');
+  }
+  grid.innerHTML = html;
   updateBulkBar();
+}
+
+// 事件委托：避免每张卡绑一堆 inline handler
+document.getElementById('grid').onclick = (e)=>{
+  const t = e.target;
+  if(t.classList.contains('selbox')){
+    e.stopPropagation();
+    toggleSelect(+t.getAttribute('data-sel'), t.checked);
+    // 只改 class，不全量重绘
+    const card = t.closest('.card');
+    if(card) card.classList.toggle('selected', t.checked);
+    updateBulkBar();
+    return;
+  }
+  const btn = t.closest('[data-act]');
+  if(btn){
+    e.stopPropagation();
+    const id = +btn.getAttribute('data-id');
+    const act = btn.getAttribute('data-act');
+    if(act==='check') checkOne(id);
+    else if(act==='edit') openEdit(id);
+    else if(act==='del') delAcc(id, btn.getAttribute('data-email')||'');
+    return;
+  }
+  const card = t.closest('.card');
+  if(card){
+    const id = +card.getAttribute('data-id');
+    const acc = pageAccounts.find(a=>+a.id===id);
+    viewMail(id, acc ? acc.email : '');
+  }
+};
+
+function renderPager(){
+  const bar = document.getElementById('pagerBar');
+  if(!bar) return;
+  if(listTotalPages <= 1){
+    bar.innerHTML = `<span style="color:var(--muted);font-size:12px">共 ${filteredTotal} 条</span>`;
+    return;
+  }
+  const pages = [];
+  const maxBtn = 7;
+  let start = Math.max(1, listPage - 3);
+  let end = Math.min(listTotalPages, start + maxBtn - 1);
+  start = Math.max(1, end - maxBtn + 1);
+  pages.push(`<button class="btn" ${listPage<=1?'disabled':''} onclick="goPage(${listPage-1})">上一页</button>`);
+  for(let i=start;i<=end;i++){
+    pages.push(`<button class="btn ${i===listPage?'active':''}" onclick="goPage(${i})">${i}</button>`);
+  }
+  pages.push(`<button class="btn" ${listPage>=listTotalPages?'disabled':''} onclick="goPage(${listPage+1})">下一页</button>`);
+  pages.push(`<span style="color:var(--muted);font-size:12px">${listPage}/${listTotalPages} · 共 ${filteredTotal} 条 · 每页
+    <select id="pageSizeSel" onchange="changePageSize(this.value)">
+      <option value="50" ${listPageSize===50?'selected':''}>50</option>
+      <option value="100" ${listPageSize===100?'selected':''}>100</option>
+      <option value="200" ${listPageSize===200?'selected':''}>200</option>
+    </select></span>`);
+  bar.innerHTML = pages.join('');
+}
+function goPage(p){
+  p = Math.max(1, Math.min(listTotalPages, +p||1));
+  if(p===listPage) return;
+  listPage = p;
+  loadList();
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+function changePageSize(v){
+  listPageSize = Math.max(20, Math.min(300, +v||100));
+  listPage = 1;
+  loadList();
 }
 
 function esc(s){
@@ -389,9 +495,11 @@ function openImport(){
   });
 }
 
-function openEdit(id){
-  const d = allAccounts.find(a=>+a.id===+id);
-  if(!d) return;
+async function openEdit(id){
+  const resp = await fetch('api.php?action=get_account&id='+id,{headers:{'X-Requested-With':'XMLHttpRequest'}});
+  const j = await resp.json();
+  if(!j.ok){ toast(j.error||'读取账号失败'); return; }
+  const d = j.data || {};
   showForm('编辑账号', `
     <label>邮箱</label><input id="e_mail" value="${esc(d.email)}">
     <label>密码</label><input id="e_pass" value="${esc(d.password||'')}">
@@ -565,22 +673,34 @@ function toggleSelect(id, on){
   id = +id;
   if(on) selectedIds.add(id); else selectedIds.delete(id);
   updateBulkBar();
-  // soft refresh selection style without full re-fetch
-  doSearch();
 }
-function selectAllFiltered(on){
-  const list = filteredList();
-  if(on) list.forEach(a=>selectedIds.add(+a.id));
-  else list.forEach(a=>selectedIds.delete(+a.id));
-  doSearch();
+async function selectAllFiltered(on){
+  if(!on){
+    // 只清当前页可见的
+    pageAccounts.forEach(a=>selectedIds.delete(+a.id));
+    renderGrid(pageAccounts);
+    return;
+  }
+  // 拉当前筛选全部 id（轻量）
+  const kw = document.getElementById('searchInput').value.trim();
+  const qs = new URLSearchParams({action:'list_ids', status: filter||'all', q: kw});
+  const r = await (await fetch('api.php?'+qs.toString(),{headers:{'X-Requested-With':'XMLHttpRequest'}})).json();
+  if(!r.ok){ toast(r.error||'全选失败'); return; }
+  (r.ids||[]).forEach(id=>selectedIds.add(+id));
+  toast('已选中 '+selectedIds.size+' 个');
+  renderGrid(pageAccounts);
 }
-function invertSelection(){
-  const list = filteredList();
-  list.forEach(a=>{
-    const id=+a.id;
+async function invertSelection(){
+  const kw = document.getElementById('searchInput').value.trim();
+  const qs = new URLSearchParams({action:'list_ids', status: filter||'all', q: kw});
+  const r = await (await fetch('api.php?'+qs.toString(),{headers:{'X-Requested-With':'XMLHttpRequest'}})).json();
+  if(!r.ok){ toast(r.error||'反选失败'); return; }
+  const all = new Set((r.ids||[]).map(Number));
+  all.forEach(id=>{
     if(selectedIds.has(id)) selectedIds.delete(id); else selectedIds.add(id);
   });
-  doSearch();
+  toast('已选中 '+selectedIds.size+' 个');
+  renderGrid(pageAccounts);
 }
 function selectedIdList(){ return Array.from(selectedIds); }
 function updateBulkBar(){
@@ -593,8 +713,7 @@ function updateBulkBar(){
   }
   const countEl = document.getElementById('listCount');
   if(countEl){
-    const shown = filteredList().length;
-    countEl.textContent = `显示 ${shown} / 总 ${allAccounts.length} · 已选 ${n}`;
+    countEl.textContent = `本页 ${pageAccounts.length} · 筛选 ${filteredTotal} · 库 ${statsCache.total||0} · 已选 ${n}`;
   }
 }
 async function deleteSelected(){
@@ -676,7 +795,7 @@ async function delAcc(id, email){
 }
 
 async function deleteDead(){
-  const n = allAccounts.filter(a=>a.status==='dead').length;
+  const n = statsCache.dead||0;
   if(!n){ toast('没有 Dead 账号'); return; }
   if(!confirm('清理 '+n+' 个 Dead 账号？')) return;
   await deleteByScope('dead');
@@ -701,15 +820,16 @@ async function checkAll(){
     return;
   }
   await loadRuntimeSettings();
-  const list = filteredList();
-  if(!list.length){ toast('没有可检测账号'); return; }
+  const kw = document.getElementById('searchInput').value.trim();
+  const idRes = await (await fetch('api.php?'+new URLSearchParams({action:'list_ids',status:filter||'all',q:kw}).toString(),{headers:{'X-Requested-With':'XMLHttpRequest'}})).json();
+  if(!idRes.ok || !(idRes.ids||[]).length){ toast('没有可检测账号'); return; }
+  const ids = (idRes.ids||[]).map(Number);
 
   let concurrency = parseInt(runtimeSettings.check_concurrency || '20', 10);
   if(!Number.isFinite(concurrency) || concurrency < 1) concurrency = 1;
   if(concurrency > 50) concurrency = 50;
 
-  const ids = list.map(a => +a.id);
-  if(!confirm('将对当前列表 '+ids.length+' 个账号启动后台验活？\n并发='+concurrency+'\n（受顶部筛选/搜索影响）')) return;
+  if(!confirm('将对当前筛选 '+ids.length+' 个账号启动后台验活？\n并发='+concurrency)) return;
   openCheckPanel();
   setCheckUiRunning(true, `提交后台任务 · 分片并发=${concurrency}`);
   document.getElementById('checkLog').textContent = `准备启动后台 worker · 账号=${ids.length} · 并发=${concurrency}\n`;

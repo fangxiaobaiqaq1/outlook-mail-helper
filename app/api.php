@@ -8,30 +8,119 @@ global $db;
 
 $action = $_GET['action'] ?? ($_POST['action'] ?? '');
 
-// ---------- 列表 ----------
+// ---------- 列表（轻量，不含 token/密码，1 万账号也不炸前端） ----------
 if ($action === 'list') {
-    $rows = $db->query("SELECT id, email, password, client_id, refresh_token, remark, status, last_check_at, last_error, created_at FROM accounts ORDER BY id DESC")->fetchAll();
-    // 列表默认脱敏；完整机密仅编辑接口返回
+    $q = trim((string)($_GET['q'] ?? ''));
+    $status = trim((string)($_GET['status'] ?? 'all')); // all|live|dead|unknown
+    $page = max(1, (int)($_GET['page'] ?? 1));
+    $pageSize = (int)($_GET['page_size'] ?? 100);
+    if ($pageSize < 20) $pageSize = 20;
+    if ($pageSize > 300) $pageSize = 300;
+
+    $where = [];
+    $params = [];
+    if ($status === 'live' || $status === 'dead') {
+        $where[] = 'status = ?';
+        $params[] = $status;
+    } elseif ($status === 'unknown') {
+        $where[] = "(status IS NULL OR status = '' OR status = 'unknown')";
+    }
+    if ($q !== '') {
+        $where[] = '(email LIKE ? OR IFNULL(remark,\'\') LIKE ?)';
+        $like = '%' . $q . '%';
+        $params[] = $like;
+        $params[] = $like;
+    }
+    $sqlWhere = $where ? ('WHERE ' . implode(' AND ', $where)) : '';
+
+    $stCount = $db->prepare("SELECT COUNT(*) FROM accounts $sqlWhere");
+    $stCount->execute($params);
+    $filteredTotal = (int)$stCount->fetchColumn();
+
+    // 全局统计（轻量聚合，不拖全表到 PHP）
+    $statsRow = $db->query("SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN status='live' THEN 1 ELSE 0 END) AS live,
+        SUM(CASE WHEN status='dead' THEN 1 ELSE 0 END) AS dead
+      FROM accounts")->fetch();
+    $totalAll = (int)($statsRow['total'] ?? 0);
+    $liveAll = (int)($statsRow['live'] ?? 0);
+    $deadAll = (int)($statsRow['dead'] ?? 0);
+    $unkAll = max(0, $totalAll - $liveAll - $deadAll);
+
+    $offset = ($page - 1) * $pageSize;
+    $st = $db->prepare("SELECT id, email, remark, status, last_check_at, last_error, created_at,
+        CASE WHEN IFNULL(password,'') != '' THEN 1 ELSE 0 END AS has_password,
+        CASE WHEN IFNULL(refresh_token,'') != '' THEN 1 ELSE 0 END AS has_token
+      FROM accounts $sqlWhere
+      ORDER BY id DESC
+      LIMIT $pageSize OFFSET $offset");
+    $st->execute($params);
+    $rows = $st->fetchAll();
     $out = [];
     foreach ($rows as $r) {
         $out[] = [
             'id' => (int)$r['id'],
             'email' => $r['email'],
             'remark' => $r['remark'],
-            'status' => $r['status'],
+            'status' => $r['status'] ?: 'unknown',
             'last_check_at' => $r['last_check_at'],
-            'last_error' => $r['last_error'],
+            'last_error' => $r['last_error'] ? mb_substr((string)$r['last_error'], 0, 80) : null,
             'created_at' => $r['created_at'],
-            'has_password' => !empty($r['password']),
-            'has_token' => !empty($r['refresh_token']),
-            'client_id_preview' => $r['client_id'] ? (substr((string)$r['client_id'], 0, 8) . '…') : '',
-            // 兼容现有编辑弹窗：仍返回完整字段（已登录会话）。后续可改 get_account。
-            'password' => $r['password'],
-            'client_id' => $r['client_id'],
-            'refresh_token' => $r['refresh_token'],
+            'has_password' => !empty($r['has_password']),
+            'has_token' => !empty($r['has_token']),
         ];
     }
-    json_out(['ok' => true, 'data' => $out, 'csrf' => ($_SESSION['csrf'] ?? '')]);
+    json_out([
+        'ok' => true,
+        'data' => $out,
+        'page' => $page,
+        'page_size' => $pageSize,
+        'filtered_total' => $filteredTotal,
+        'total_pages' => max(1, (int)ceil($filteredTotal / $pageSize)),
+        'stats' => [
+            'total' => $totalAll,
+            'live' => $liveAll,
+            'dead' => $deadAll,
+            'unknown' => $unkAll,
+        ],
+        'csrf' => ($_SESSION['csrf'] ?? ''),
+    ]);
+}
+
+// ---------- 单账号完整信息（编辑用） ----------
+if ($action === 'get_account') {
+    $id = (int)($_GET['id'] ?? $_POST['id'] ?? 0);
+    $stmt = $db->prepare("SELECT * FROM accounts WHERE id=?");
+    $stmt->execute([$id]);
+    $acc = $stmt->fetch();
+    if (!$acc) json_out(['ok' => false, 'error' => '账号不存在'], 404);
+    json_out(['ok' => true, 'data' => $acc]);
+}
+
+// ---------- 仅 ID 列表（全选当前筛选用，轻量） ----------
+if ($action === 'list_ids') {
+    $q = trim((string)($_GET['q'] ?? ''));
+    $status = trim((string)($_GET['status'] ?? 'all'));
+    $where = [];
+    $params = [];
+    if ($status === 'live' || $status === 'dead') {
+        $where[] = 'status = ?';
+        $params[] = $status;
+    } elseif ($status === 'unknown') {
+        $where[] = "(status IS NULL OR status = '' OR status = 'unknown')";
+    }
+    if ($q !== '') {
+        $where[] = '(email LIKE ? OR IFNULL(remark,\'\') LIKE ?)';
+        $like = '%' . $q . '%';
+        $params[] = $like;
+        $params[] = $like;
+    }
+    $sqlWhere = $where ? ('WHERE ' . implode(' AND ', $where)) : '';
+    $st = $db->prepare("SELECT id FROM accounts $sqlWhere ORDER BY id DESC");
+    $st->execute($params);
+    $ids = array_map('intval', array_column($st->fetchAll(), 'id'));
+    json_out(['ok' => true, 'ids' => $ids, 'count' => count($ids)]);
 }
 
 // ---------- 添加（单条） ----------
