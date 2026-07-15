@@ -505,7 +505,15 @@ function showForm(title, html, onSubmit, opts={}){
   btn.style.display = opts.hideSubmit ? 'none' : '';
   btn.onclick = async ()=>{
     btn.disabled = true; btn.textContent='提交中...';
-    try { await onSubmit(); if(!opts.keepOpen){ closeModals(); await loadList(); toast('完成'); } }
+    try {
+      const msg = await onSubmit();
+      if(!opts.keepOpen){
+        closeModals();
+        await loadList();
+        // onSubmit 返回字符串则用它做 toast，避免把导入结果盖成「完成」
+        toast((typeof msg === 'string' && msg) ? msg : (opts.successToast || '完成'));
+      }
+    }
     catch(e){ toast(e.message||'失败'); }
     finally { btn.disabled=false; btn.textContent='确认'; }
   };
@@ -523,6 +531,15 @@ function openAdd(){
     fd.append('remark', document.getElementById('remark').value);
     const r = await (await fetch('api.php?action=add',{method:'POST',body:fd,headers:{'X-Requested-With':'XMLHttpRequest'}})).json();
     if(!r.ok) throw new Error(r.error||'添加失败');
+    // 单条添加也回全部视图，避免当前 group/status 把新号滤掉
+    filter = 'all';
+    groupFilter = 'all';
+    listPage = 1;
+    selectedIds.clear();
+    syncFilterChips();
+    syncExportLinks();
+    const g = r.mail_group ? (' · 分组 '+r.mail_group) : '';
+    return '添加成功' + g + (r.updated ? '（已更新同邮箱）' : '');
   });
 }
 
@@ -660,11 +677,18 @@ function openImport(){
       setProg('导入中 '+ci+'/'+ct+' 块 · 已处理约 '+off+'/'+total+' 行');
     });
     setProg('完成');
+    // 导入后强制切回「全部域名 + 全部状态」，否则停在 Outlook/Live 筛选时会以为 hotmail 没导入成功
+    filter = 'all';
+    groupFilter = 'all';
+    listPage = 1;
+    selectedIds.clear();
+    syncFilterChips();
+    syncExportLinks();
     let msg = `导入完成：新增${sum.added||0} 更新${sum.updated||0} 失败${sum.failed||0}（${sum.chunks} 块 / ${sum.total_lines} 行）`;
     if(sum.errors && sum.errors.length){
       msg += '；样例错误: ' + sum.errors.slice(0,3).join('；');
     }
-    toast(msg);
+    return msg;
   });
 }
 
