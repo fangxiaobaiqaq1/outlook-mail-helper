@@ -18,6 +18,7 @@ header('X-Frame-Options: SAMEORIGIN');
 header('X-Content-Type-Options: nosniff');
 
 require_once __DIR__ . '/settings_schema.php';
+require_once __DIR__ . '/account_group.php';
 require_once __DIR__ . '/check_engine.php';
 require_once __DIR__ . '/job_store.php';
 
@@ -58,6 +59,7 @@ try {
         client_secret TEXT,
         remark TEXT,
         status TEXT DEFAULT 'unknown',
+        mail_group TEXT NOT NULL DEFAULT 'other',
         last_check_at TEXT,
         last_error TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -74,6 +76,29 @@ try {
     }
     if (!in_array('last_error', $colNames, true)) {
         $db->exec("ALTER TABLE accounts ADD COLUMN last_error TEXT");
+    }
+    $needGroupBackfill = false;
+    if (!in_array('mail_group', $colNames, true)) {
+        $db->exec("ALTER TABLE accounts ADD COLUMN mail_group TEXT NOT NULL DEFAULT 'other'");
+        $needGroupBackfill = true;
+    }
+
+    // 导入/查重按 email：大号池必须有索引，否则 10 万行会退化成全表扫
+    $idx = $db->query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_accounts_email'")->fetchColumn();
+    if (!$idx) {
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_accounts_email ON accounts(email)");
+    }
+    $idxG = $db->query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_accounts_mail_group'")->fetchColumn();
+    if (!$idxG) {
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_accounts_mail_group ON accounts(mail_group)");
+    }
+    $idxGS = $db->query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_accounts_group_status'")->fetchColumn();
+    if (!$idxGS) {
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_accounts_group_status ON accounts(mail_group, status)");
+    }
+    // 旧库新列：按 email 域名回填分组（分批，避免大事务）
+    if ($needGroupBackfill) {
+        accounts_reclassify_mail_groups($db, 1000);
     }
 
     $adminCols = $db->query("PRAGMA table_info(admin)")->fetchAll();
@@ -735,5 +760,115 @@ function parse_account_line(string $line): ?array {
         'client_id'     => $p[2] ?? '',
         'refresh_token' => $p[3] ?? '',
         'remark'        => $p[4] ?? '',
+    ];
+}
+
+/**
+ * 批量导入账号（按行）。
+ * 每 500 行 commit 一次，避免超大事务 + 降低峰值内存。
+ *
+ * @param array<int,string|array> $items 每项是文本行，或已解析的关联数组
+ * @param int $lineOffset 行号偏移（分块导入时用于错误提示）
+ * @return array{added:int,updated:int,failed:int,errors:array<int,string>,total_lines:int}
+ */
+function import_account_batch(PDO $db, array $items, int $lineOffset = 0): array {
+    @set_time_limit(0);
+    @ini_set('memory_limit', '1024M');
+
+    $added = 0;
+    $updated = 0;
+    $failed = 0;
+    $errors = [];
+    $total = count($items);
+
+    if ($total === 0) {
+        return [
+            'added' => 0,
+            'updated' => 0,
+            'failed' => 0,
+            'errors' => [],
+            'total_lines' => 0,
+        ];
+    }
+
+    $sel = $db->prepare("SELECT id FROM accounts WHERE email = ?");
+    $ins = $db->prepare("INSERT INTO accounts (email, password, client_id, refresh_token, remark, status, mail_group) VALUES (?,?,?,?,?, 'unknown', ?)");
+    $upd = $db->prepare("UPDATE accounts SET password=?, client_id=?, refresh_token=?, remark=?, status='unknown', last_error=NULL, mail_group=? WHERE id=?");
+
+    $db->beginTransaction();
+    try {
+        $n = 0;
+        foreach ($items as $i => $item) {
+            $lineNo = $lineOffset + (int)$i + 1;
+            if (is_array($item)) {
+                $email = trim((string)($item['email'] ?? ''));
+                if ($email === '') {
+                    $failed++;
+                    if (count($errors) < 20) $errors[] = '第' . $lineNo . '行缺少 email';
+                    continue;
+                }
+                $parsed = [
+                    'email' => $email,
+                    'password' => (string)($item['password'] ?? ''),
+                    'client_id' => (string)($item['client_id'] ?? ''),
+                    'refresh_token' => (string)($item['refresh_token'] ?? ''),
+                    'remark' => (string)($item['remark'] ?? ''),
+                ];
+            } else {
+                $line = (string)$item;
+                $parsed = parse_account_line($line);
+                if (!$parsed) {
+                    if (trim($line) !== '') {
+                        $failed++;
+                        if (count($errors) < 20) $errors[] = '第' . $lineNo . '行格式无效';
+                    }
+                    continue;
+                }
+            }
+
+            $mailGroup = account_group_from_email((string)$parsed['email']);
+            $sel->execute([$parsed['email']]);
+            $old = $sel->fetch();
+            if ($old) {
+                $upd->execute([
+                    $parsed['password'],
+                    $parsed['client_id'],
+                    $parsed['refresh_token'],
+                    $parsed['remark'],
+                    $mailGroup,
+                    $old['id'],
+                ]);
+                $updated++;
+            } else {
+                $ins->execute([
+                    $parsed['email'],
+                    $parsed['password'],
+                    $parsed['client_id'],
+                    $parsed['refresh_token'],
+                    $parsed['remark'],
+                    $mailGroup,
+                ]);
+                $added++;
+            }
+
+            $n++;
+            // 分段提交：大号池导入更稳，也避免 WAL 膨胀
+            if ($n % 500 === 0) {
+                $db->commit();
+                $db->beginTransaction();
+            }
+        }
+        if ($db->inTransaction()) $db->commit();
+    } catch (Throwable $e) {
+        if ($db->inTransaction()) $db->rollBack();
+        throw $e;
+    }
+
+    return [
+        'added' => $added,
+        'updated' => $updated,
+        'failed' => $failed,
+        'errors' => $errors,
+        'total_lines' => $total,
     ];
 }

@@ -78,6 +78,13 @@ input:focus,textarea:focus{border-color:var(--main);box-shadow:0 0 0 3px rgba(37
 .mail-item .codes{margin-top:6px;display:flex;flex-wrap:wrap;gap:4px}
 .chip{background:#eff6ff;color:#1d4ed8;border-radius:999px;padding:2px 8px;font-size:11px;font-weight:700;cursor:pointer}
 .chip-green{background:#ecfdf5;color:#047857}
+.filter-chip{border:1px solid var(--line);background:#f8fafc;border-radius:999px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer;color:var(--text)}
+.filter-chip.active{background:var(--main);border-color:var(--main);color:#fff}
+.filter-chip .n{opacity:.75;font-weight:600;margin-left:4px}
+.group-badge{display:inline-block;font-size:10px;font-weight:700;padding:1px 6px;border-radius:999px;margin-left:6px;vertical-align:middle}
+.group-badge-hotmail{background:#fef3c7;color:#92400e}
+.group-badge-outlook{background:#dbeafe;color:#1e40af}
+.group-badge-other{background:#f1f5f9;color:#475569}
 .mail-view{position:relative;overflow:auto}
 .progress{height:8px;background:#e2e8f0;border-radius:999px;overflow:hidden;margin:10px 0}
 .progress>i{display:block;height:100%;width:0;background:linear-gradient(90deg,#2563eb,#22c55e);transition:width .2s}
@@ -107,9 +114,10 @@ input:focus,textarea:focus{border-color:var(--main);box-shadow:0 0 0 3px rgba(37
     <button class="btn btn-main" onclick="openAdd()">+ 添加</button>
     <button class="btn" onclick="openImport()">批量导入</button>
     <button class="btn btn-ok" id="btnCheckAll" onclick="checkAll()">批量验活</button>
-    <button class="btn" onclick="location.href='api.php?action=export_txt&type=live'">导出Live</button>
-    <button class="btn" onclick="location.href='api.php?action=export_txt&type=dead'">导出Dead</button>
-    <button class="btn" onclick="location.href='api.php?action=export'">导出JSON</button>
+    <button class="btn" id="btnRefreshTokens" onclick="refreshTokens()" title="仅 OAuth 刷新 refresh_token 并写回">刷新令牌</button>
+    <button class="btn" onclick="location.href='api.php?action=export_txt&type=live'" id="btnExportLive">导出Live</button>
+    <button class="btn" onclick="location.href='api.php?action=export_txt&type=dead'" id="btnExportDead">导出Dead</button>
+    <button class="btn" onclick="location.href='api.php?action=export'" id="btnExportJson">导出JSON</button>
     <button class="btn" onclick="location.href='get_token.php'" title="设备码授权拿 Token">拿Token</button>
     <button class="btn" onclick="openSettings()">设置</button>
     <button class="btn btn-bad" onclick="location.href='api.php?action=logout'">退出</button>
@@ -133,11 +141,11 @@ input:focus,textarea:focus{border-color:var(--main);box-shadow:0 0 0 3px rgba(37
     <div class="stat"><div class="n" id="stUnk" style="color:var(--warn)">0</div><div class="l">未检测</div></div>
   </div>
 
-  <div class="toolbar">
-    <button class="btn" onclick="filterStatus('all')">全部</button>
-    <button class="btn" onclick="filterStatus('live')">仅 Live</button>
-    <button class="btn" onclick="filterStatus('dead')">仅 Dead</button>
-    <button class="btn" onclick="filterStatus('unknown')">仅未检测</button>
+  <div class="toolbar" id="statusToolbar">
+    <button class="btn filter-chip active" data-status="all" onclick="filterStatus('all')">全部</button>
+    <button class="btn filter-chip" data-status="live" onclick="filterStatus('live')">仅 Live</button>
+    <button class="btn filter-chip" data-status="dead" onclick="filterStatus('dead')">仅 Dead</button>
+    <button class="btn filter-chip" data-status="unknown" onclick="filterStatus('unknown')">仅未检测</button>
     <button class="btn" onclick="selectAllFiltered(true)">全选当前</button>
     <button class="btn" onclick="selectAllFiltered(false)">取消选择</button>
     <button class="btn" onclick="invertSelection()">反选</button>
@@ -145,6 +153,12 @@ input:focus,textarea:focus{border-color:var(--main);box-shadow:0 0 0 3px rgba(37
     <button class="btn btn-bad" onclick="deleteByScope('live')">删除全部 Live</button>
     <button class="btn btn-bad" onclick="deleteByScope('all')">删除全部账号</button>
     <span id="listCount" style="color:var(--muted);font-size:12px;margin-left:auto">点击卡片查看邮件</span>
+  </div>
+  <div class="toolbar" id="groupToolbar" style="padding-top:0">
+    <button class="btn filter-chip active" data-group="all" onclick="filterGroup('all')">全部域名<span class="n" id="gAll">0</span></button>
+    <button class="btn filter-chip" data-group="hotmail" onclick="filterGroup('hotmail')">Hotmail<span class="n" id="gHotmail">0</span></button>
+    <button class="btn filter-chip" data-group="outlook" onclick="filterGroup('outlook')">Outlook<span class="n" id="gOutlook">0</span></button>
+    <button class="btn filter-chip" data-group="other" onclick="filterGroup('other')">其他<span class="n" id="gOther">0</span></button>
   </div>
 
   <div class="bulkbar" id="bulkBar">
@@ -154,6 +168,7 @@ input:focus,textarea:focus{border-color:var(--main);box-shadow:0 0 0 3px rgba(37
     <button class="btn" onclick="remarkSelected('append')">追加备注</button>
     <button class="btn" onclick="remarkSelected('clear')">清空备注</button>
     <button class="btn" onclick="checkSelected()">验活选中</button>
+    <button class="btn" onclick="refreshSelected()">刷新选中令牌</button>
     <button class="btn" onclick="selectAllFiltered(false)">取消选择</button>
   </div>
 
@@ -222,11 +237,12 @@ input:focus,textarea:focus{border-color:var(--main);box-shadow:0 0 0 3px rgba(37
 <script>
 let pageAccounts = [];       // 当前页轻量数据
 let filter = 'all';
+let groupFilter = 'all';     // all|hotmail|outlook|other
 let listPage = 1;
 let listPageSize = 100;
 let listTotalPages = 1;
 let filteredTotal = 0;
-let statsCache = {total:0,live:0,dead:0,unknown:0};
+let statsCache = {total:0,live:0,dead:0,unknown:0,groups:{hotmail:0,outlook:0,other:0}};
 let searchTimer = null;
 let listLoading = false;
 let currentMailId = null;
@@ -241,6 +257,37 @@ let settingsSchema = {};
 let settingsGroups = {};
 let settingsTab = 'proxy';
 
+function listQueryParams(extra={}){
+  const kw = document.getElementById('searchInput').value.trim();
+  return Object.assign({
+    status: filter || 'all',
+    group: groupFilter || 'all',
+    q: kw
+  }, extra);
+}
+function exportHref(action, type){
+  const qs = new URLSearchParams({action});
+  if(type) qs.set('type', type);
+  if(groupFilter && groupFilter !== 'all') qs.set('group', groupFilter);
+  return 'api.php?' + qs.toString();
+}
+function syncExportLinks(){
+  const live = document.getElementById('btnExportLive');
+  const dead = document.getElementById('btnExportDead');
+  const json = document.getElementById('btnExportJson');
+  if(live) live.setAttribute('onclick', "location.href='"+exportHref('export_txt','live')+"'");
+  if(dead) dead.setAttribute('onclick', "location.href='"+exportHref('export_txt','dead')+"'");
+  if(json) json.setAttribute('onclick', "location.href='"+exportHref('export')+"'");
+}
+function syncFilterChips(){
+  document.querySelectorAll('#statusToolbar [data-status]').forEach(el=>{
+    el.classList.toggle('active', el.dataset.status === (filter||'all'));
+  });
+  document.querySelectorAll('#groupToolbar [data-group]').forEach(el=>{
+    el.classList.toggle('active', el.dataset.group === (groupFilter||'all'));
+  });
+}
+
 function toast(msg){
   const el = document.getElementById('toast');
   el.textContent = msg;
@@ -253,20 +300,23 @@ function badge(status){
   if(status==='dead') return '<span class="badge badge-dead">DEAD</span>';
   return '<span class="badge badge-unknown">未检测</span>';
 }
+function groupBadge(g){
+  const labels = {hotmail:'HOTMAIL', outlook:'OUTLOOK', other:'OTHER'};
+  if(!g || g==='other') return '<span class="group-badge group-badge-other">OTHER</span>';
+  const cls = g==='hotmail' ? 'group-badge-hotmail' : (g==='outlook' ? 'group-badge-outlook' : 'group-badge-other');
+  return `<span class="group-badge ${cls}">${labels[g]||String(g).toUpperCase()}</span>`;
+}
 
 async function loadList(opts={}){
   if(listLoading) return;
   listLoading = true;
   try{
     if(opts.resetPage) listPage = 1;
-    const kw = document.getElementById('searchInput').value.trim();
-    const qs = new URLSearchParams({
+    const qs = new URLSearchParams(listQueryParams({
       action: 'list',
       page: String(listPage),
-      page_size: String(listPageSize),
-      status: filter || 'all',
-      q: kw
-    });
+      page_size: String(listPageSize)
+    }));
     const res = await fetch('api.php?' + qs.toString(), {headers:{'X-Requested-With':'XMLHttpRequest'}});
     const raw = await res.text();
     let data;
@@ -281,6 +331,8 @@ async function loadList(opts={}){
     renderStats();
     renderGrid(pageAccounts);
     renderPager();
+    syncFilterChips();
+    syncExportLinks();
   } finally {
     listLoading = false;
   }
@@ -291,6 +343,16 @@ function renderStats(){
   document.getElementById('stLive').textContent = statsCache.live||0;
   document.getElementById('stDead').textContent = statsCache.dead||0;
   document.getElementById('stUnk').textContent = statsCache.unknown||0;
+  const g = statsCache.groups || {};
+  const gh = g.hotmail||0, go = g.outlook||0, gt = g.other||0;
+  const elAll = document.getElementById('gAll');
+  const elH = document.getElementById('gHotmail');
+  const elO = document.getElementById('gOutlook');
+  const elT = document.getElementById('gOther');
+  if(elAll) elAll.textContent = (statsCache.total||0);
+  if(elH) elH.textContent = gh;
+  if(elO) elO.textContent = go;
+  if(elT) elT.textContent = gt;
 }
 
 function doSearch(){
@@ -301,6 +363,16 @@ function doSearch(){
 function filterStatus(s){
   filter = s;
   listPage = 1;
+  selectedIds.clear();
+  syncFilterChips();
+  loadList();
+}
+function filterGroup(g){
+  groupFilter = g || 'all';
+  listPage = 1;
+  selectedIds.clear(); // 避免跨分组脏选
+  syncFilterChips();
+  syncExportLinks();
   loadList();
 }
 
@@ -327,6 +399,7 @@ function renderGrid(data){
         <div style="display:flex;align-items:center;gap:8px">
           <input class="selbox" type="checkbox" ${checked} data-sel="${sid}" title="选择">
           ${badge(a.status||'unknown')}
+          ${groupBadge(a.mail_group||'other')}
         </div>
         <div class="card-actions">
           <button class="icon-btn" data-act="check" data-id="${sid}" title="验活">✓</button>
@@ -453,21 +526,106 @@ function openAdd(){
   });
 }
 
+// 分块导入：浏览器本地读文件 → 按行切块 POST，绕过 80MB/post_max 总限制
+const IMPORT_CHUNK_LINES = 4000; // ~2MB/块（单行≈0.5KB），单请求稳过 php post_max
+
+function splitImportLines(text){
+  // 保留空行位置以便错误行号一致，但去掉纯空白尾巴
+  let lines = String(text||'').split(/\r\n|\r|\n/);
+  while(lines.length && !String(lines[lines.length-1]).trim()) lines.pop();
+  return lines;
+}
+
+function chunkLines(lines, size){
+  const out = [];
+  for(let i=0;i<lines.length;i+=size){
+    out.push({
+      lines: lines.slice(i, i+size),
+      offset: i,
+    });
+  }
+  return out;
+}
+
+async function postImportChunk(chunkText, meta){
+  const fd = new FormData();
+  fd.append('text', chunkText);
+  fd.append('line_offset', String(meta.offset||0));
+  fd.append('chunk_index', String(meta.index||0));
+  fd.append('chunk_total', String(meta.total||0));
+  const resp = await fetch('api.php?action=import_text',{
+    method:'POST', body:fd, headers:{'X-Requested-With':'XMLHttpRequest'}
+  });
+  const raw = await resp.text();
+  let r;
+  try { r = JSON.parse(raw); }
+  catch(e){
+    throw new Error('服务器返回异常 HTTP '+resp.status+'：'+(raw.slice(0,120)||'空响应')+'。请确认已用本版本（分块导入）。');
+  }
+  if(!r.ok) throw new Error(r.error||('导入失败 chunk '+(meta.index+1)+'/'+meta.total));
+  return r;
+}
+
+async function importTextChunked(text, onProgress){
+  const lines = splitImportLines(text);
+  if(!lines.length) throw new Error('没有可导入的内容');
+  const chunks = chunkLines(lines, IMPORT_CHUNK_LINES);
+  const sum = {added:0, updated:0, failed:0, errors:[], total_lines: lines.length, chunks: chunks.length};
+  for(let i=0;i<chunks.length;i++){
+    const c = chunks[i];
+    if(onProgress) onProgress(i+1, chunks.length, c.offset, lines.length);
+    // 块内再按字节保护：极长行时进一步切
+    let buf = [], bufBytes = 0, localOff = c.offset;
+    const flush = async ()=>{
+      if(!buf.length) return;
+      const r = await postImportChunk(buf.join('\n'), {
+        offset: localOff, index: i, total: chunks.length
+      });
+      sum.added += r.added||0;
+      sum.updated += r.updated||0;
+      sum.failed += r.failed||0;
+      if(Array.isArray(r.errors)){
+        for(const e of r.errors){
+          if(sum.errors.length < 30) sum.errors.push(e);
+        }
+      }
+      localOff += buf.length;
+      buf = []; bufBytes = 0;
+    };
+    for(const line of c.lines){
+      const b = (line.length + 1);
+      // 单请求软顶 8MB 文本，避免 FormData 膨胀
+      if(buf.length && bufBytes + b > 8*1024*1024) await flush();
+      buf.push(line);
+      bufBytes += b;
+    }
+    await flush();
+  }
+  return sum;
+}
+
 function openImport(){
   showForm('批量导入', `
     <label>粘贴多行凭证（每行一个）</label>
     <textarea id="import_text" rows="12" placeholder="email----pass----client_id----refresh_token"></textarea>
     <div style="font-size:12px;color:#64748b;margin-bottom:8px">
-      或选择 JSON/TXT 文件（1 万行建议用文件，浏览器本地读取，避免上传失败）：
+      或选择 TXT/CSV/JSON 文件（浏览器本地读取 + <b>自动分块</b>，无 80MB 总上限）：
       <input type="file" id="importFile" accept=".json,.txt,.csv" style="margin-top:8px">
     </div>
-    <div class="field-hint">大文件请用 txt 一行一条；不要用超大 JSON 数组。</div>
+    <div class="field-hint">大号池请用 <b>txt 一行一条</b>（推荐）。JSON 大数组仍会整包解析，不适合 10 万+。</div>
+    <div id="importProgress" style="display:none;margin-top:10px;font-size:13px;color:#334155"></div>
   `, async ()=>{
     const file = document.getElementById('importFile').files[0];
     let text = document.getElementById('import_text').value || '';
-    // 文件优先：前端 FileReader 读文本，走 import_text，绕过 PHP 上传限制
+    const prog = document.getElementById('importProgress');
+    const setProg = (s)=>{ if(prog){ prog.style.display='block'; prog.textContent=s; } };
+
     if(file){
-      if(file.size > 80*1024*1024) throw new Error('文件超过 80MB，请拆分');
+      // 浏览器内存软顶：>1.5GB 直接拒（防把小白电脑干翻）
+      if(file.size > 1500*1024*1024){
+        throw new Error('文件超过 1.5GB，请先在外部拆分后再导入');
+      }
+      setProg('正在读取文件 ' + (file.size/1024/1024).toFixed(1) + ' MB ...');
       text = await new Promise((resolve, reject)=>{
         const reader = new FileReader();
         reader.onload = ()=>resolve(String(reader.result||''));
@@ -475,23 +633,38 @@ function openImport(){
         reader.readAsText(file);
       });
     }
-    if(!text.trim()) throw new Error('没有可导入的内容');
-    const lines = text.split(/\r\n|\r|\n/).filter(l=>l.trim()).length;
-    if(lines > 500 && !confirm('将导入约 '+lines+' 行，可能需要几十秒，继续？')) return;
+    if(!String(text||'').trim()) throw new Error('没有可导入的内容');
 
-    const fd = new FormData();
-    fd.append('text', text);
-    const resp = await fetch('api.php?action=import_text',{
-      method:'POST', body:fd, headers:{'X-Requested-With':'XMLHttpRequest'}
-    });
-    const raw = await resp.text();
-    let r;
-    try { r = JSON.parse(raw); }
-    catch(e){
-      throw new Error('服务器返回异常 HTTP '+resp.status+'：'+(raw.slice(0,120)||'空响应')+'。大文件请确认已用本版本导入。');
+    // JSON 数组：小文件兼容；大文件劝用 txt
+    const trimmed = text.trim();
+    if(trimmed.startsWith('[') && trimmed.endsWith(']')){
+      if(trimmed.length > 20*1024*1024){
+        throw new Error('JSON 数组超过 20MB。请导出为 txt（一行 email----pass----client_id----refresh_token）再导入。');
+      }
+      let arr;
+      try { arr = JSON.parse(trimmed); }
+      catch(e){ throw new Error('JSON 解析失败: '+(e.message||e)); }
+      if(!Array.isArray(arr)) throw new Error('JSON 必须是账号数组');
+      // 转成行文本再走分块
+      text = arr.map(i=>{
+        if(!i || typeof i !== 'object') return '';
+        return [i.email||'', i.password||'', i.client_id||'', i.refresh_token||'', i.remark||''].join('----');
+      }).filter(Boolean).join('\n');
     }
-    if(!r.ok) throw new Error(r.error||'导入失败');
-    toast(`导入完成：新增${r.added||0} 更新${r.updated||0} 失败${r.failed||0}`);
+
+    const approx = splitImportLines(text).length;
+    if(approx > 2000 && !confirm('将导入约 '+approx+' 行（自动分块，可超过 80MB）。继续？')) return;
+
+    setProg('准备分块导入，共约 '+approx+' 行 ...');
+    const sum = await importTextChunked(text, (ci, ct, off, total)=>{
+      setProg('导入中 '+ci+'/'+ct+' 块 · 已处理约 '+off+'/'+total+' 行');
+    });
+    setProg('完成');
+    let msg = `导入完成：新增${sum.added||0} 更新${sum.updated||0} 失败${sum.failed||0}（${sum.chunks} 块 / ${sum.total_lines} 行）`;
+    if(sum.errors && sum.errors.length){
+      msg += '；样例错误: ' + sum.errors.slice(0,3).join('；');
+    }
+    toast(msg);
   });
 }
 
@@ -682,8 +855,7 @@ async function selectAllFiltered(on){
     return;
   }
   // 拉当前筛选全部 id（轻量）
-  const kw = document.getElementById('searchInput').value.trim();
-  const qs = new URLSearchParams({action:'list_ids', status: filter||'all', q: kw});
+  const qs = new URLSearchParams(listQueryParams({action:'list_ids'}));
   const r = await (await fetch('api.php?'+qs.toString(),{headers:{'X-Requested-With':'XMLHttpRequest'}})).json();
   if(!r.ok){ toast(r.error||'全选失败'); return; }
   (r.ids||[]).forEach(id=>selectedIds.add(+id));
@@ -691,8 +863,7 @@ async function selectAllFiltered(on){
   renderGrid(pageAccounts);
 }
 async function invertSelection(){
-  const kw = document.getElementById('searchInput').value.trim();
-  const qs = new URLSearchParams({action:'list_ids', status: filter||'all', q: kw});
+  const qs = new URLSearchParams(listQueryParams({action:'list_ids'}));
   const r = await (await fetch('api.php?'+qs.toString(),{headers:{'X-Requested-With':'XMLHttpRequest'}})).json();
   if(!r.ok){ toast(r.error||'反选失败'); return; }
   const all = new Set((r.ids||[]).map(Number));
@@ -731,12 +902,13 @@ async function deleteSelected(){
 }
 async function deleteByScope(scope){
   const labels = {all:'全部账号', live:'全部 Live', dead:'全部 Dead', unknown:'全部未检测'};
-  const label = labels[scope] || scope;
+  const gLabels = {all:'全部域名', hotmail:'Hotmail', outlook:'Outlook', other:'其他'};
+  const label = (labels[scope] || scope) + ' · ' + (gLabels[groupFilter]||groupFilter);
   if(!confirm('确定删除【'+label+'】？此操作不可恢复！')) return;
-  if(scope==='all' && !confirm('再次确认：删除数据库中的全部邮箱账号？')) return;
+  if(scope==='all' && groupFilter==='all' && !confirm('再次确认：删除数据库中的全部邮箱账号？')) return;
   const r = await (await fetch('api.php?action=delete_batch',{
     method:'POST', headers:{'X-Requested-With':'XMLHttpRequest','Content-Type':'application/json'},
-    body: JSON.stringify({scope})
+    body: JSON.stringify({scope, group: groupFilter||'all'})
   })).json();
   if(!r.ok){ toast(r.error||'删除失败'); return; }
   selectedIds.clear();
@@ -813,6 +985,59 @@ async function checkOneCurrent(){
   if(currentMailId) await checkOne(currentMailId);
 }
 
+
+async function startTokenJob(ids, label){
+  if(!ids || !ids.length){ toast('没有可刷新的账号'); return; }
+  if(checkRunning && currentJobId){
+    openCheckPanel();
+    toast('已有任务进行中');
+    return;
+  }
+  await loadRuntimeSettings();
+  let concurrency = parseInt(runtimeSettings.check_concurrency || '20', 10);
+  if(!Number.isFinite(concurrency) || concurrency < 1) concurrency = 1;
+  if(concurrency > 50) concurrency = 50;
+  if(!confirm((label||'刷新令牌') + '：' + ids.length + ' 个账号\n仅 OAuth 刷新 refresh_token 并写回\n并发=' + concurrency + '\n不探测 IMAP')) return;
+
+  openCheckPanel();
+  setCheckUiRunning(true, '提交刷新令牌任务…');
+  document.getElementById('checkLog').textContent = `mode=refresh · ${ids.length} 账号 · 并发=${concurrency}\n`;
+  try{
+    const r = await (await fetch('api.php?action=job_start_check',{
+      method:'POST',
+      headers:{'X-Requested-With':'XMLHttpRequest','Content-Type':'application/json'},
+      body: JSON.stringify({ids, concurrency, scope:'ids', mode:'refresh', imap_probe:false, update_token:true})
+    })).json();
+    if(!r.ok){
+      if(r.job && r.job.id){
+        currentJobId = r.job.id; checkRunning = true; startJobPolling(r.job.id);
+        toast(r.error||'已有任务'); return;
+      }
+      setCheckUiRunning(false, r.error||'启动失败'); toast(r.error||'启动失败'); return;
+    }
+    currentJobId = r.job_id || (r.job && r.job.id);
+    checkRunning = true;
+    document.getElementById('checkLog').textContent += `任务已启动 job=${currentJobId} · 刷新令牌后台运行\n`;
+    startJobPolling(currentJobId);
+    toast('刷新令牌任务已启动');
+  }catch(e){
+    setCheckUiRunning(false, '启动异常');
+    toast(e.message||'启动异常');
+  }
+}
+
+async function refreshTokens(){
+  const idRes = await (await fetch('api.php?'+new URLSearchParams(listQueryParams({action:'list_ids'})).toString(),{headers:{'X-Requested-With':'XMLHttpRequest'}})).json();
+  if(!idRes.ok || !(idRes.ids||[]).length){ toast('没有可刷新的账号'); return; }
+  await startTokenJob((idRes.ids||[]).map(Number), '刷新当前筛选令牌');
+}
+
+async function refreshSelected(){
+  const ids = selectedIdList();
+  if(!ids.length){ toast('未选择账号'); return; }
+  await startTokenJob(ids, '刷新选中令牌');
+}
+
 async function checkAll(){
   if(checkRunning && currentJobId){
     openCheckPanel();
@@ -820,8 +1045,7 @@ async function checkAll(){
     return;
   }
   await loadRuntimeSettings();
-  const kw = document.getElementById('searchInput').value.trim();
-  const idRes = await (await fetch('api.php?'+new URLSearchParams({action:'list_ids',status:filter||'all',q:kw}).toString(),{headers:{'X-Requested-With':'XMLHttpRequest'}})).json();
+  const idRes = await (await fetch('api.php?'+new URLSearchParams(listQueryParams({action:'list_ids'})).toString(),{headers:{'X-Requested-With':'XMLHttpRequest'}})).json();
   if(!idRes.ok || !(idRes.ids||[]).length){ toast('没有可检测账号'); return; }
   const ids = (idRes.ids||[]).map(Number);
 
@@ -936,10 +1160,16 @@ function renderJobStatus(job){
     if(['done','cancelled','error'].includes(job.status)){
       setTimeout(()=>{ if(jb && !checkRunning) jb.style.display='none'; }, 8000);
     }
+    const isRefresh = (job.mode==='refresh' || job.type==='refresh');
     document.getElementById('jobBarTitle').textContent =
-      job.status==='running'?'验活中': job.status==='cancelling'?'停止中': job.status==='done'?'验活完成': job.status==='cancelled'?'已停止': '验活';
+      job.status==='running'?(isRefresh?'刷新令牌中':'验活中'):
+      job.status==='cancelling'?'停止中':
+      job.status==='done'?(isRefresh?'令牌刷新完成':'验活完成'):
+      job.status==='cancelled'?'已停止': (isRefresh?'刷新令牌':'验活');
     document.getElementById('jobBarText').textContent =
-      `${job.done||0}/${job.total||0} · Live ${job.live||0} · Dead ${job.dead||0} · ${job.speed||0}/s`;
+      `${job.done||0}/${job.total||0} · Live ${job.live||0} · Dead ${job.dead||0}`
+      + (isRefresh?` · 续期 ${job.refreshed||0}`:'')
+      + ` · ${job.speed||0}/s`;
     document.getElementById('jobBarProg').style.width = Math.min(100, job.percent||0)+'%';
   }
   const bar = document.getElementById('checkBar');

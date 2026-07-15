@@ -12,26 +12,15 @@ $action = $_GET['action'] ?? ($_POST['action'] ?? '');
 if ($action === 'list') {
     $q = trim((string)($_GET['q'] ?? ''));
     $status = trim((string)($_GET['status'] ?? 'all')); // all|live|dead|unknown
+    $group = account_group_normalize($_GET['group'] ?? 'all'); // all|hotmail|outlook|other
     $page = max(1, (int)($_GET['page'] ?? 1));
     $pageSize = (int)($_GET['page_size'] ?? 100);
     if ($pageSize < 20) $pageSize = 20;
     if ($pageSize > 300) $pageSize = 300;
 
-    $where = [];
-    $params = [];
-    if ($status === 'live' || $status === 'dead') {
-        $where[] = 'status = ?';
-        $params[] = $status;
-    } elseif ($status === 'unknown') {
-        $where[] = "(status IS NULL OR status = '' OR status = 'unknown')";
-    }
-    if ($q !== '') {
-        $where[] = '(email LIKE ? OR IFNULL(remark,\'\') LIKE ?)';
-        $like = '%' . $q . '%';
-        $params[] = $like;
-        $params[] = $like;
-    }
-    $sqlWhere = $where ? ('WHERE ' . implode(' AND ', $where)) : '';
+    $clause = accounts_filter_clause(['status' => $status, 'group' => $group, 'q' => $q]);
+    $sqlWhere = $clause['sql'];
+    $params = $clause['params'];
 
     $stCount = $db->prepare("SELECT COUNT(*) FROM accounts $sqlWhere");
     $stCount->execute($params);
@@ -41,7 +30,10 @@ if ($action === 'list') {
     $statsRow = $db->query("SELECT
         COUNT(*) AS total,
         SUM(CASE WHEN status='live' THEN 1 ELSE 0 END) AS live,
-        SUM(CASE WHEN status='dead' THEN 1 ELSE 0 END) AS dead
+        SUM(CASE WHEN status='dead' THEN 1 ELSE 0 END) AS dead,
+        SUM(CASE WHEN mail_group='hotmail' THEN 1 ELSE 0 END) AS g_hotmail,
+        SUM(CASE WHEN mail_group='outlook' THEN 1 ELSE 0 END) AS g_outlook,
+        SUM(CASE WHEN mail_group='other' THEN 1 ELSE 0 END) AS g_other
       FROM accounts")->fetch();
     $totalAll = (int)($statsRow['total'] ?? 0);
     $liveAll = (int)($statsRow['live'] ?? 0);
@@ -49,7 +41,7 @@ if ($action === 'list') {
     $unkAll = max(0, $totalAll - $liveAll - $deadAll);
 
     $offset = ($page - 1) * $pageSize;
-    $st = $db->prepare("SELECT id, email, remark, status, last_check_at, last_error, created_at,
+    $st = $db->prepare("SELECT id, email, remark, status, mail_group, last_check_at, last_error, created_at,
         CASE WHEN IFNULL(password,'') != '' THEN 1 ELSE 0 END AS has_password,
         CASE WHEN IFNULL(refresh_token,'') != '' THEN 1 ELSE 0 END AS has_token
       FROM accounts $sqlWhere
@@ -59,11 +51,16 @@ if ($action === 'list') {
     $rows = $st->fetchAll();
     $out = [];
     foreach ($rows as $r) {
+        $mg = (string)($r['mail_group'] ?? '');
+        if (!in_array($mg, account_group_values(), true)) {
+            $mg = account_group_from_email((string)$r['email']);
+        }
         $out[] = [
             'id' => (int)$r['id'],
             'email' => $r['email'],
             'remark' => $r['remark'],
             'status' => $r['status'] ?: 'unknown',
+            'mail_group' => $mg,
             'last_check_at' => $r['last_check_at'],
             'last_error' => $r['last_error'] ? mb_substr((string)$r['last_error'], 0, 80) : null,
             'created_at' => $r['created_at'],
@@ -78,11 +75,17 @@ if ($action === 'list') {
         'page_size' => $pageSize,
         'filtered_total' => $filteredTotal,
         'total_pages' => max(1, (int)ceil($filteredTotal / $pageSize)),
+        'group' => $group,
         'stats' => [
             'total' => $totalAll,
             'live' => $liveAll,
             'dead' => $deadAll,
             'unknown' => $unkAll,
+            'groups' => [
+                'hotmail' => (int)($statsRow['g_hotmail'] ?? 0),
+                'outlook' => (int)($statsRow['g_outlook'] ?? 0),
+                'other' => (int)($statsRow['g_other'] ?? 0),
+            ],
         ],
         'csrf' => ($_SESSION['csrf'] ?? ''),
     ]);
@@ -102,25 +105,12 @@ if ($action === 'get_account') {
 if ($action === 'list_ids') {
     $q = trim((string)($_GET['q'] ?? ''));
     $status = trim((string)($_GET['status'] ?? 'all'));
-    $where = [];
-    $params = [];
-    if ($status === 'live' || $status === 'dead') {
-        $where[] = 'status = ?';
-        $params[] = $status;
-    } elseif ($status === 'unknown') {
-        $where[] = "(status IS NULL OR status = '' OR status = 'unknown')";
-    }
-    if ($q !== '') {
-        $where[] = '(email LIKE ? OR IFNULL(remark,\'\') LIKE ?)';
-        $like = '%' . $q . '%';
-        $params[] = $like;
-        $params[] = $like;
-    }
-    $sqlWhere = $where ? ('WHERE ' . implode(' AND ', $where)) : '';
-    $st = $db->prepare("SELECT id FROM accounts $sqlWhere ORDER BY id DESC");
-    $st->execute($params);
+    $group = account_group_normalize($_GET['group'] ?? 'all');
+    $clause = accounts_filter_clause(['status' => $status, 'group' => $group, 'q' => $q]);
+    $st = $db->prepare("SELECT id FROM accounts {$clause['sql']} ORDER BY id DESC");
+    $st->execute($clause['params']);
     $ids = array_map('intval', array_column($st->fetchAll(), 'id'));
-    json_out(['ok' => true, 'ids' => $ids, 'count' => count($ids)]);
+    json_out(['ok' => true, 'ids' => $ids, 'count' => count($ids), 'group' => $group]);
 }
 
 // ---------- 添加（单条） ----------
@@ -137,74 +127,64 @@ if ($action === 'add') {
     $exists = $db->prepare("SELECT id FROM accounts WHERE email = ?");
     $exists->execute([$parsed['email']]);
     $old = $exists->fetch();
+    $mailGroup = account_group_from_email((string)$parsed['email']);
     if ($old) {
-        $stmt = $db->prepare("UPDATE accounts SET password=?, client_id=?, refresh_token=?, remark=?, status='unknown', last_error=NULL WHERE id=?");
-        $stmt->execute([$parsed['password'], $parsed['client_id'], $parsed['refresh_token'], $parsed['remark'], $old['id']]);
-        json_out(['ok' => true, 'updated' => true, 'id' => (int)$old['id']]);
+        $stmt = $db->prepare("UPDATE accounts SET password=?, client_id=?, refresh_token=?, remark=?, status='unknown', last_error=NULL, mail_group=? WHERE id=?");
+        $stmt->execute([$parsed['password'], $parsed['client_id'], $parsed['refresh_token'], $parsed['remark'], $mailGroup, $old['id']]);
+        json_out(['ok' => true, 'updated' => true, 'id' => (int)$old['id'], 'mail_group' => $mailGroup]);
     }
 
-    $stmt = $db->prepare("INSERT INTO accounts (email, password, client_id, refresh_token, remark, status) VALUES (?,?,?,?,?, 'unknown')");
-    $stmt->execute([$parsed['email'], $parsed['password'], $parsed['client_id'], $parsed['refresh_token'], $parsed['remark']]);
-    json_out(['ok' => true, 'id' => (int)$db->lastInsertId()]);
+    $stmt = $db->prepare("INSERT INTO accounts (email, password, client_id, refresh_token, remark, status, mail_group) VALUES (?,?,?,?,?, 'unknown', ?)");
+    $stmt->execute([$parsed['email'], $parsed['password'], $parsed['client_id'], $parsed['refresh_token'], $parsed['remark'], $mailGroup]);
+    json_out(['ok' => true, 'id' => (int)$db->lastInsertId(), 'mail_group' => $mailGroup]);
 }
 
-// ---------- 批量文本导入 ----------
+// ---------- 批量文本导入（支持前端分块；单请求上限 32MB 文本，总包无上限） ----------
 if ($action === 'import_text') {
     $text = (string)($_POST['text'] ?? '');
+    $lineOffset = max(0, (int)($_POST['line_offset'] ?? 0));
+    $chunkIndex = max(0, (int)($_POST['chunk_index'] ?? 0));
+    $chunkTotal = max(0, (int)($_POST['chunk_total'] ?? 0));
     // 也允许 JSON body
     if ($text === '') {
         $rawBody = file_get_contents('php://input');
         if ($rawBody) {
             $j = json_decode($rawBody, true);
-            if (is_array($j) && isset($j['text'])) $text = (string)$j['text'];
-            elseif ($rawBody !== '' && $rawBody[0] !== '{') $text = $rawBody;
+            if (is_array($j)) {
+                if (isset($j['text'])) $text = (string)$j['text'];
+                if (isset($j['line_offset'])) $lineOffset = max(0, (int)$j['line_offset']);
+                if (isset($j['chunk_index'])) $chunkIndex = max(0, (int)$j['chunk_index']);
+                if (isset($j['chunk_total'])) $chunkTotal = max(0, (int)$j['chunk_total']);
+            } elseif ($rawBody !== '' && $rawBody[0] !== '{') {
+                $text = $rawBody;
+            }
         }
     }
     if ($text === '') json_out(['ok' => false, 'error' => '文本为空'], 400);
-    if (strlen($text) > 80 * 1024 * 1024) {
-        json_out(['ok' => false, 'error' => '内容过大（>80MB），请拆分导入'], 400);
+    // 单请求保护：前端应分块；32MB ≈ 6 万行左右
+    $maxChunk = 32 * 1024 * 1024;
+    if (strlen($text) > $maxChunk) {
+        json_out([
+            'ok' => false,
+            'error' => '单次请求过大（>' . (int)($maxChunk / 1024 / 1024) . 'MB）。请用最新前端分块导入，或把文件拆小。',
+            'hint' => 'chunked',
+        ], 400);
     }
-
-    @set_time_limit(0);
-    @ini_set('memory_limit', '512M');
 
     $lines = preg_split('/\r\n|\r|\n/', $text);
-    $added = 0;
-    $updated = 0;
-    $failed = 0;
-    $errors = [];
+    // 丢掉末尾空行，避免分块拼接产生伪失败
+    while ($lines && trim((string)end($lines)) === '') array_pop($lines);
 
-    $sel = $db->prepare("SELECT id FROM accounts WHERE email = ?");
-    $ins = $db->prepare("INSERT INTO accounts (email, password, client_id, refresh_token, remark, status) VALUES (?,?,?,?,?, 'unknown')");
-    $upd = $db->prepare("UPDATE accounts SET password=?, client_id=?, refresh_token=?, remark=?, status='unknown', last_error=NULL WHERE id=?");
-
-    $db->beginTransaction();
     try {
-        foreach ($lines as $i => $line) {
-            $parsed = parse_account_line($line);
-            if (!$parsed) {
-                if (trim($line) !== '') {
-                    $failed++;
-                    if (count($errors) < 20) $errors[] = '第' . ($i + 1) . '行格式无效';
-                }
-                continue;
-            }
-            $sel->execute([$parsed['email']]);
-            $old = $sel->fetch();
-            if ($old) {
-                $upd->execute([$parsed['password'], $parsed['client_id'], $parsed['refresh_token'], $parsed['remark'], $old['id']]);
-                $updated++;
-            } else {
-                $ins->execute([$parsed['email'], $parsed['password'], $parsed['client_id'], $parsed['refresh_token'], $parsed['remark']]);
-                $added++;
-            }
-        }
-        $db->commit();
+        $res = import_account_batch($db, $lines, $lineOffset);
     } catch (Throwable $e) {
-        if ($db->inTransaction()) $db->rollBack();
         json_out(['ok' => false, 'error' => '导入异常: ' . $e->getMessage()], 500);
     }
-    json_out(['ok' => true, 'added' => $added, 'updated' => $updated, 'failed' => $failed, 'errors' => $errors, 'total_lines' => count($lines)]);
+    $res['ok'] = true;
+    $res['chunk_index'] = $chunkIndex;
+    $res['chunk_total'] = $chunkTotal;
+    $res['line_offset'] = $lineOffset;
+    json_out($res);
 }
 
 // ---------- 更新 ----------
@@ -217,10 +197,11 @@ if ($action === 'update_account') {
     $cid   = trim($_POST['client_id'] ?? '');
     $token = trim($_POST['refresh_token'] ?? '');
     $remark = trim($_POST['remark'] ?? '');
+    $mailGroup = account_group_from_email($email);
 
-    $stmt = $db->prepare("UPDATE accounts SET email=?, password=?, client_id=?, refresh_token=?, remark=? WHERE id=?");
-    $stmt->execute([$email, $pass, $cid, $token, $remark, $id]);
-    json_out(['ok' => true]);
+    $stmt = $db->prepare("UPDATE accounts SET email=?, password=?, client_id=?, refresh_token=?, remark=?, mail_group=? WHERE id=?");
+    $stmt->execute([$email, $pass, $cid, $token, $remark, $mailGroup, $id]);
+    json_out(['ok' => true, 'mail_group' => $mailGroup]);
 }
 
 // ---------- 删除 ----------
@@ -231,7 +212,7 @@ if ($action === 'delete') {
 }
 
 // ---------- 批量删除 ----------
-// 支持: ids[] / scope=selected|all|live|dead|unknown
+// 支持: ids[] / scope=selected|all|live|dead|unknown，可选 group=all|hotmail|outlook|other
 if ($action === 'delete_batch') {
     $input = $_POST;
     $raw = file_get_contents('php://input');
@@ -240,24 +221,16 @@ if ($action === 'delete_batch') {
         if (is_array($j)) $input = array_merge($input, $j);
     }
     $scope = (string)($input['scope'] ?? 'selected');
+    $group = account_group_normalize($input['group'] ?? 'all');
     $ids = $input['ids'] ?? [];
     if (is_string($ids)) $ids = json_decode($ids, true) ?: [];
 
-    if ($scope === 'all') {
-        $n = (int)$db->exec("DELETE FROM accounts");
-        json_out(['ok' => true, 'deleted' => $n, 'scope' => 'all']);
-    }
-    if ($scope === 'live') {
-        $n = (int)$db->exec("DELETE FROM accounts WHERE status='live'");
-        json_out(['ok' => true, 'deleted' => $n, 'scope' => 'live']);
-    }
-    if ($scope === 'dead') {
-        $n = (int)$db->exec("DELETE FROM accounts WHERE status='dead'");
-        json_out(['ok' => true, 'deleted' => $n, 'scope' => 'dead']);
-    }
-    if ($scope === 'unknown') {
-        $n = (int)$db->exec("DELETE FROM accounts WHERE status='unknown' OR status IS NULL OR status=''");
-        json_out(['ok' => true, 'deleted' => $n, 'scope' => 'unknown']);
+    if (in_array($scope, ['all', 'live', 'dead', 'unknown'], true)) {
+        $status = $scope === 'all' ? 'all' : $scope;
+        $clause = accounts_filter_clause(['status' => $status, 'group' => $group, 'q' => '']);
+        $n = $db->prepare("DELETE FROM accounts {$clause['sql']}");
+        $n->execute($clause['params']);
+        json_out(['ok' => true, 'deleted' => $n->rowCount(), 'scope' => $scope, 'group' => $group]);
     }
 
     if (!is_array($ids) || !$ids) json_out(['ok' => false, 'error' => '未选择账号'], 400);
@@ -289,15 +262,14 @@ if ($action === 'remark_batch') {
         json_out(['ok' => false, 'error' => 'mode 无效'], 400);
     }
 
-    // resolve ids by scope
-    if ($scope === 'all') {
-        $ids = array_column($db->query("SELECT id FROM accounts")->fetchAll(), 'id');
-    } elseif ($scope === 'live') {
-        $ids = array_column($db->query("SELECT id FROM accounts WHERE status='live'")->fetchAll(), 'id');
-    } elseif ($scope === 'dead') {
-        $ids = array_column($db->query("SELECT id FROM accounts WHERE status='dead'")->fetchAll(), 'id');
-    } elseif ($scope === 'unknown') {
-        $ids = array_column($db->query("SELECT id FROM accounts WHERE status='unknown' OR status IS NULL OR status=''")->fetchAll(), 'id');
+    // resolve ids by scope（可选 group 维）
+    if (in_array($scope, ['all', 'live', 'dead', 'unknown'], true)) {
+        $group = account_group_normalize($input['group'] ?? 'all');
+        $status = $scope === 'all' ? 'all' : $scope;
+        $clause = accounts_filter_clause(['status' => $status, 'group' => $group, 'q' => '']);
+        $st = $db->prepare("SELECT id FROM accounts {$clause['sql']}");
+        $st->execute($clause['params']);
+        $ids = array_column($st->fetchAll(), 'id');
     }
     if (!is_array($ids) || !$ids) json_out(['ok' => false, 'error' => '未选择账号'], 400);
     $ids = array_values(array_unique(array_map('intval', $ids)));
@@ -345,26 +317,35 @@ if ($action === 'job_start_check') {
     }
 
     $scope = $input['scope'] ?? 'filtered'; // filtered|all|ids|live|dead|unknown
+    $group = account_group_normalize($input['group'] ?? 'all');
     $ids = $input['ids'] ?? null;
     if (is_string($ids)) $ids = json_decode($ids, true);
 
     if (is_array($ids) && $ids) {
         $idList = array_map('intval', $ids);
-    } elseif ($scope === 'all') {
-        $idList = array_column($db->query("SELECT id FROM accounts ORDER BY id ASC")->fetchAll(), 'id');
-    } elseif ($scope === 'live') {
-        $idList = array_column($db->query("SELECT id FROM accounts WHERE status='live' ORDER BY id ASC")->fetchAll(), 'id');
-    } elseif ($scope === 'dead') {
-        $idList = array_column($db->query("SELECT id FROM accounts WHERE status='dead' ORDER BY id ASC")->fetchAll(), 'id');
-    } elseif ($scope === 'unknown') {
-        $idList = array_column($db->query("SELECT id FROM accounts WHERE status='unknown' OR status IS NULL OR status='' ORDER BY id ASC")->fetchAll(), 'id');
     } else {
-        // filtered: 前端应传 ids；没传就全量
-        $idList = array_column($db->query("SELECT id FROM accounts ORDER BY id ASC")->fetchAll(), 'id');
+        // 防御性：无 ids 时按 scope×group 过滤（前端正常路径总是传 ids）
+        $status = in_array($scope, ['live', 'dead', 'unknown'], true) ? $scope : 'all';
+        $clause = accounts_filter_clause(['status' => $status, 'group' => $group, 'q' => '']);
+        $st = $db->prepare("SELECT id FROM accounts {$clause['sql']} ORDER BY id ASC");
+        $st->execute($clause['params']);
+        $idList = array_map('intval', array_column($st->fetchAll(), 'id'));
     }
 
     $concurrency = isset($input['concurrency']) ? (int)$input['concurrency'] : setting_int('check_concurrency', 20);
-    $res = job_start_check($db, $idList, ['concurrency' => $concurrency]);
+    $mode = (string)($input['mode'] ?? 'check'); // check | refresh
+    $opts = ['concurrency' => $concurrency, 'mode' => $mode];
+    if (array_key_exists('imap_probe', $input)) {
+        $opts['imap_probe'] = !empty($input['imap_probe']) && $input['imap_probe'] !== '0' && $input['imap_probe'] !== false;
+    }
+    if (array_key_exists('update_token', $input)) {
+        $opts['update_token'] = !empty($input['update_token']) && $input['update_token'] !== '0' && $input['update_token'] !== false;
+    }
+    if ($mode === 'refresh') {
+        $opts['imap_probe'] = false;
+        $opts['update_token'] = true;
+    }
+    $res = job_start_check($db, $idList, $opts);
     json_out($res, !empty($res['ok']) ? 200 : 409);
 }
 
@@ -493,16 +474,15 @@ if ($action === 'check_chunk') {
     ]);
 }
 
-// ---------- 导出 live / dead / all ----------
+// ---------- 导出 live / dead / all（可选 group） ----------
 if ($action === 'export_txt') {
     $type = $_GET['type'] ?? 'all'; // all | live | dead
-    if ($type === 'live') {
-        $rows = $db->query("SELECT * FROM accounts WHERE status='live' ORDER BY id")->fetchAll();
-    } elseif ($type === 'dead') {
-        $rows = $db->query("SELECT * FROM accounts WHERE status='dead' ORDER BY id")->fetchAll();
-    } else {
-        $rows = $db->query("SELECT * FROM accounts ORDER BY id")->fetchAll();
-    }
+    $group = account_group_normalize($_GET['group'] ?? 'all');
+    $status = in_array($type, ['live', 'dead'], true) ? $type : 'all';
+    $clause = accounts_filter_clause(['status' => $status, 'group' => $group, 'q' => '']);
+    $st = $db->prepare("SELECT * FROM accounts {$clause['sql']} ORDER BY id");
+    $st->execute($clause['params']);
+    $rows = $st->fetchAll();
 
     $delim = (string)setting_get_fresh('export_delimiter', '----');
     if ($delim === '') $delim = '----';
@@ -515,7 +495,8 @@ if ($action === 'export_txt') {
             $r['refresh_token'] ?? '',
         ]);
     }
-    $filename = "outlook_{$type}_" . date('Ymd_His') . '.txt';
+    $gTag = $group === 'all' ? $type : "{$group}_{$type}";
+    $filename = "outlook_{$gTag}_" . date('Ymd_His') . '.txt';
     header('Content-Type: text/plain; charset=utf-8');
     header('Content-Disposition: attachment; filename="' . $filename . '"');
     echo implode("\r\n", $lines);
@@ -523,8 +504,13 @@ if ($action === 'export_txt') {
 }
 
 if ($action === 'export') {
-    $data = $db->query("SELECT * FROM accounts")->fetchAll();
-    $filename = 'outlook_accounts_' . date('Ymd_His') . '.json';
+    $group = account_group_normalize($_GET['group'] ?? 'all');
+    $clause = accounts_filter_clause(['status' => 'all', 'group' => $group, 'q' => '']);
+    $st = $db->prepare("SELECT * FROM accounts {$clause['sql']} ORDER BY id");
+    $st->execute($clause['params']);
+    $data = $st->fetchAll();
+    $gTag = $group === 'all' ? 'all' : $group;
+    $filename = 'outlook_accounts_' . $gTag . '_' . date('Ymd_His') . '.json';
     header('Content-Type: application/json; charset=utf-8');
     header('Content-Disposition: attachment; filename="' . $filename . '"');
     echo json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
@@ -532,10 +518,9 @@ if ($action === 'export') {
 }
 
 if ($action === 'import') {
-    // 大文件上传失败时 tmp_name 为空 → 以前直接 500，前端 JSON.parse 炸掉
+    // 兼容旧上传入口；大文件请走前端分块 + import_text
     $raw = '';
     if (!empty($_POST['text'])) {
-        // 前端也可把文件内容读出来走 text，绕过 upload 限制
         $raw = (string)$_POST['text'];
     } elseif (isset($_FILES['file'])) {
         $f = $_FILES['file'];
@@ -551,75 +536,55 @@ if ($action === 'import') {
                 UPLOAD_ERR_EXTENSION  => '扩展阻止了上传',
             ];
             $msg = $map[$err] ?? ('上传失败 error=' . $err);
-            $msg .= '。建议：用「粘贴文本」导入，或把文件拆小。当前 post_max=' . ini_get('post_max_size') . ' upload_max=' . ini_get('upload_max_filesize');
+            $msg .= '。建议：用「批量导入」选文件（自动分块），当前 post_max=' . ini_get('post_max_size') . ' upload_max=' . ini_get('upload_max_filesize');
             json_out(['ok' => false, 'error' => $msg], 400);
         }
         $tmp = (string)($f['tmp_name'] ?? '');
         if ($tmp === '' || !is_file($tmp)) {
             json_out([
                 'ok' => false,
-                'error' => '上传临时文件无效（可能超过 post_max_size=' . ini_get('post_max_size') . '）。请改用粘贴文本导入。',
+                'error' => '上传临时文件无效（可能超过 post_max_size=' . ini_get('post_max_size') . '）。请改用「批量导入」选文件。',
+            ], 400);
+        }
+        $size = (int)@filesize($tmp);
+        // 单次 multipart 仍受 php.ini 限制；超过 32MB 直接拒，避免 OOM
+        if ($size > 32 * 1024 * 1024) {
+            json_out([
+                'ok' => false,
+                'error' => '单文件上传超过 32MB。请用界面「批量导入」选文件（浏览器本地读 + 自动分块，无总大小上限）。',
+                'hint' => 'chunked',
             ], 400);
         }
         $raw = (string)@file_get_contents($tmp);
-        if ($raw === '' && filesize($tmp) > 0) {
+        if ($raw === '' && $size > 0) {
             json_out(['ok' => false, 'error' => '无法读取上传文件'], 400);
         }
     } else {
         json_out(['ok' => false, 'error' => '未上传文件且未提供 text 字段'], 400);
     }
 
-    if (strlen($raw) > 80 * 1024 * 1024) {
-        json_out(['ok' => false, 'error' => '内容过大（>80MB），请拆分导入'], 400);
-    }
-
-    @set_time_limit(0);
-    @ini_set('memory_limit', '512M');
-
     $data = json_decode($raw, true);
-    $added = 0; $updated = 0; $failed = 0;
-    $sel = $db->prepare("SELECT id FROM accounts WHERE email=?");
-    $ins = $db->prepare("INSERT INTO accounts (email,password,client_id,refresh_token,remark,status) VALUES (?,?,?,?,?, 'unknown')");
-    $upd = $db->prepare("UPDATE accounts SET password=?, client_id=?, refresh_token=?, remark=?, status='unknown', last_error=NULL WHERE id=?");
-
-    // 批量事务加速 1 万行
-    $db->beginTransaction();
     try {
         if (is_array($data)) {
-            foreach ($data as $i) {
-                if (empty($i['email'])) { $failed++; continue; }
-                $sel->execute([$i['email']]);
-                $old = $sel->fetch();
-                if ($old) {
-                    $upd->execute([$i['password']??'', $i['client_id']??'', $i['refresh_token']??'', $i['remark']??'', $old['id']]);
-                    $updated++;
-                } else {
-                    $ins->execute([$i['email'], $i['password']??'', $i['client_id']??'', $i['refresh_token']??'', $i['remark']??'']);
-                    $added++;
-                }
+            // JSON 数组：整包入批（前端大 JSON 不推荐，但仍兼容）
+            if (count($data) > 50000) {
+                json_out([
+                    'ok' => false,
+                    'error' => 'JSON 数组超过 5 万条。请改用 txt 一行一条，界面会自动分块导入。',
+                    'hint' => 'use_txt_chunked',
+                ], 400);
             }
+            $res = import_account_batch($db, $data, 0);
         } else {
             $lines = preg_split('/\r\n|\r|\n/', (string)$raw);
-            foreach ($lines as $line) {
-                $p = parse_account_line($line);
-                if (!$p) { if (trim($line) !== '') $failed++; continue; }
-                $sel->execute([$p['email']]);
-                $old = $sel->fetch();
-                if ($old) {
-                    $upd->execute([$p['password'], $p['client_id'], $p['refresh_token'], $p['remark'], $old['id']]);
-                    $updated++;
-                } else {
-                    $ins->execute([$p['email'], $p['password'], $p['client_id'], $p['refresh_token'], $p['remark']]);
-                    $added++;
-                }
-            }
+            while ($lines && trim((string)end($lines)) === '') array_pop($lines);
+            $res = import_account_batch($db, $lines, 0);
         }
-        $db->commit();
     } catch (Throwable $e) {
-        if ($db->inTransaction()) $db->rollBack();
         json_out(['ok' => false, 'error' => '导入异常: ' . $e->getMessage()], 500);
     }
-    json_out(['ok' => true, 'added' => $added, 'updated' => $updated, 'failed' => $failed]);
+    $res['ok'] = true;
+    json_out($res);
 }
 
 // ---------- 收件 ----------
@@ -786,11 +751,40 @@ if ($action === 'tg_backup') {
 }
 
 if ($action === 'stats') {
-    $total = (int)$db->query("SELECT COUNT(*) FROM accounts")->fetchColumn();
-    $live  = (int)$db->query("SELECT COUNT(*) FROM accounts WHERE status='live'")->fetchColumn();
-    $dead  = (int)$db->query("SELECT COUNT(*) FROM accounts WHERE status='dead'")->fetchColumn();
-    $unk   = (int)$db->query("SELECT COUNT(*) FROM accounts WHERE status='unknown' OR status IS NULL OR status=''")->fetchColumn();
-    json_out(['ok' => true, 'total' => $total, 'live' => $live, 'dead' => $dead, 'unknown' => $unk]);
+    $row = $db->query("SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN status='live' THEN 1 ELSE 0 END) AS live,
+        SUM(CASE WHEN status='dead' THEN 1 ELSE 0 END) AS dead,
+        SUM(CASE WHEN mail_group='hotmail' THEN 1 ELSE 0 END) AS g_hotmail,
+        SUM(CASE WHEN mail_group='outlook' THEN 1 ELSE 0 END) AS g_outlook,
+        SUM(CASE WHEN mail_group='other' THEN 1 ELSE 0 END) AS g_other
+      FROM accounts")->fetch();
+    $total = (int)($row['total'] ?? 0);
+    $live  = (int)($row['live'] ?? 0);
+    $dead  = (int)($row['dead'] ?? 0);
+    $unk   = max(0, $total - $live - $dead);
+    json_out([
+        'ok' => true,
+        'total' => $total,
+        'live' => $live,
+        'dead' => $dead,
+        'unknown' => $unk,
+        'groups' => [
+            'hotmail' => (int)($row['g_hotmail'] ?? 0),
+            'outlook' => (int)($row['g_outlook'] ?? 0),
+            'other' => (int)($row['g_other'] ?? 0),
+        ],
+    ]);
+}
+
+// ---------- 运维：按当前规则重算 mail_group ----------
+if ($action === 'reclassify_groups') {
+    try {
+        $res = accounts_reclassify_mail_groups($db, 1000);
+        json_out(['ok' => true, 'updated' => $res['updated'], 'total' => $res['total']]);
+    } catch (Throwable $e) {
+        json_out(['ok' => false, 'error' => $e->getMessage()], 500);
+    }
 }
 
 json_out(['ok' => false, 'error' => 'unknown action: ' . $action], 400);

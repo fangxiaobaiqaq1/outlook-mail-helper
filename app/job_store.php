@@ -185,9 +185,26 @@ function job_start_check(PDO $db, array $ids, array $opts = []): array {
     $concurrency = (int)($opts['concurrency'] ?? setting_int('check_concurrency', 20));
     $concurrency = max(1, min(50, $concurrency));
 
+    // mode: check = 验活(+可选IMAP)；refresh = 仅刷新/写回 refresh_token
+    $mode = (string)($opts['mode'] ?? 'check');
+    if (!in_array($mode, ['check', 'refresh'], true)) $mode = 'check';
+
+    if ($mode === 'refresh') {
+        $imapProbe = false;
+        $updateToken = true;
+    } else {
+        $imapProbe = array_key_exists('imap_probe', $opts)
+            ? (bool)$opts['imap_probe']
+            : setting_bool('check_imap_probe');
+        $updateToken = array_key_exists('update_token', $opts)
+            ? (bool)$opts['update_token']
+            : setting_bool('check_update_token');
+    }
+
     $job = [
         'id' => $jobId,
-        'type' => 'check',
+        'type' => $mode === 'refresh' ? 'refresh' : 'check',
+        'mode' => $mode,
         'status' => 'queued', // queued|running|cancelling|cancelled|done|error
         'created_at' => date('c'),
         'updated_at' => date('c'),
@@ -199,8 +216,10 @@ function job_start_check(PDO $db, array $ids, array $opts = []): array {
         'live' => 0,
         'dead' => 0,
         'unknown' => 0,
+        'refreshed' => 0,
         'concurrency' => $concurrency,
-        'imap_probe' => setting_bool('check_imap_probe'),
+        'imap_probe' => $imapProbe,
+        'update_token' => $updateToken,
         'ids' => $ids,
         'cursor' => 0,
         'elapsed_ms' => 0,
@@ -210,7 +229,8 @@ function job_start_check(PDO $db, array $ids, array $opts = []): array {
         'error' => null,
         'pid' => null,
     ];
-    job_append_log($job, '任务创建 total=' . count($ids) . ' concurrency=' . $concurrency);
+    job_append_log($job, '任务创建 mode=' . $mode . ' total=' . count($ids) . ' concurrency=' . $concurrency
+        . ' imap=' . ($imapProbe ? '1' : '0') . ' update_token=' . ($updateToken ? '1' : '0'));
     job_write($jobId, $job);
 
     $spawn = job_spawn_worker($jobId);
@@ -248,7 +268,10 @@ function job_public_view(array $job): array {
     return [
         'id' => $job['id'] ?? '',
         'type' => $job['type'] ?? 'check',
+        'mode' => $job['mode'] ?? ($job['type'] ?? 'check'),
         'status' => $job['status'] ?? 'unknown',
+        'refreshed' => (int)($job['refreshed'] ?? 0),
+        'update_token' => !empty($job['update_token']),
         'created_at' => $job['created_at'] ?? null,
         'updated_at' => $job['updated_at'] ?? null,
         'started_at' => $job['started_at'] ?? null,

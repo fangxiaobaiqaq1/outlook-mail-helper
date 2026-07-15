@@ -124,12 +124,19 @@ function curl_multi_run(array $handles): array {
  * @param array $accounts DB 行
  * @return array 结果列表（与输入同序）
  */
-function check_accounts_parallel(PDO $db, array $accounts): array {
+/**
+ * @param array $opts force_imap / force_update_token 可覆盖全局设置
+ */
+function check_accounts_parallel(PDO $db, array $accounts, array $opts = []): array {
     $now = date('Y-m-d H:i:s');
     $delim = (string)setting_get_fresh('export_delimiter', '----');
     if ($delim === '') $delim = '----';
-    $doImap = setting_bool('check_imap_probe');
-    $updateToken = setting_bool('check_update_token');
+    $doImap = array_key_exists('force_imap', $opts)
+        ? (bool)$opts['force_imap']
+        : setting_bool('check_imap_probe');
+    $updateToken = array_key_exists('force_update_token', $opts)
+        ? (bool)$opts['force_update_token']
+        : setting_bool('check_update_token');
     $imapFailDead = setting_bool('check_mark_dead_on_imap_fail');
     $hosts = imap_host_list();
     $port = setting_int('imap_port', 993);
