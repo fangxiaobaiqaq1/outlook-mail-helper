@@ -3,7 +3,7 @@
 
 #define MyAppName "Outlook邮箱助手"
 #define MyAppNameEn "Outlook Mail Helper"
-#define MyAppVersion "1.0.2"
+#define MyAppVersion "1.0.5"
 #define MyAppPublisher "Outlook Mail Helper contributors"
 #define MyAppURL "https://github.com/fangxiaobaiqaq1/outlook-mail-helper"
 #define MyAppExeName "Outlook邮箱助手.exe"
@@ -35,7 +35,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
-VersionInfoVersion=1.0.2.0
+VersionInfoVersion=1.0.5.0
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName} Setup
 VersionInfoProductName={#MyAppName}
