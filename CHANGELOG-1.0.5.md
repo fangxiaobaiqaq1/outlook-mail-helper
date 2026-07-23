@@ -11,9 +11,9 @@
 - 共享 `accounts_filter_clause` / 重算 mail_group 运维接口
 
 ## 下载
-- Windows 绿色版：`OutlookMailHelper-Windows.zip`
+- Windows 绿色版：`OutlookMailHelper-Windows-1.0.5.zip`（解压双击 `Outlook邮箱助手.exe`）
+- Windows 安装包：`OutlookMailHelper-Setup-1.0.5.exe`（Inno Setup，可无管理员安装）
 - Linux：`outlook-mail-helper-linux-amd64.tar.gz`
-- 本次未重编 Inno Setup 安装包（无 ISCC 环境）；Windows 请用绿色 zip
 
 ## 升级注意
 关掉旧进程后覆盖；浏览器 **Ctrl+F5**。数据库自动加 `mail_group` 列。
